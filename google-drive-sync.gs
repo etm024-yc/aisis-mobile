@@ -2,6 +2,7 @@ const SYNC_TOKEN = "dudcjf11!!";
 const FOLDER_ID = "";
 const FILE_NAME = "aisis-mobile-state.json";
 const SCREENING_FILE_NAME = "aisis-mobile-screening-cache.json";
+const NASDAQ_FULL_BATCH_SIZE = 500;
 const FAIR_VALUE_WEIGHTS = {
   dcf_value: 0.30,
   per_value: 0.25,
@@ -144,9 +145,9 @@ function doGet(e) {
     return output_({ ok: false, error: "unauthorized" }, callback);
   }
 
+  const action = String(params.action || "load");
+  const market = marketCode_(params.market);
   try {
-    const action = String(params.action || "load");
-    const market = marketCode_(params.market);
     if (action === "load") return output_(loadSnapshot_(), callback);
     if (action === "quote") return output_({ ok: true, quote: fetchQuoteByMarket_(params.ticker || params.query, market) }, callback);
     if (action === "searchStocks") return output_({ ok: true, items: searchStocksByMarket_(params.query, Number(params.limit || 20), market) }, callback);
@@ -154,6 +155,9 @@ function doGet(e) {
     if (action === "screenKospi" || action === "screenMarket") return output_(screenMarket_(market, Number(params.pages || 80), Number(params.limit || 200), Number(params.seedMoney || 0), params.priorityTickers || "", params.forceTier || ""), callback);
     return output_({ ok: false, error: "unknown action" }, callback);
   } catch (error) {
+    if (action === "screenKospi" || action === "screenMarket") {
+      return output_(screeningFallbackResponse_(market, error.message || String(error)), callback);
+    }
     return output_({ ok: false, error: error.message }, callback);
   }
 }
@@ -1129,7 +1133,7 @@ function screenMarket_(market, pages, limit, seedMoney, priorityTickersText, for
     const priorityResult = mergePriorityAnalyses_(cache, priorityTickers, seedMoney, market);
     const refreshedTierId = forcedResult.ran ? forceTierId : "";
     const message = forcedResult.ran
-      ? marketTierLabel_(tierById_(forceTierId), market) + "을(를) 강제 갱신했습니다." + (priorityResult.count ? " 관심/보유 " + priorityResult.count + "개도 반영했습니다." : "")
+      ? (forcedResult.message || marketTierLabel_(tierById_(forceTierId), market) + "을(를) 강제 갱신했습니다.") + (priorityResult.count ? " 관심/보유 " + priorityResult.count + "개도 반영했습니다." : "")
       : forcedResult.reason || "강제 갱신하지 못했습니다.";
     if (forcedResult.ran || priorityResult.count) {
       cache.updatedAt = now.toISOString();
@@ -1141,7 +1145,7 @@ function screenMarket_(market, pages, limit, seedMoney, priorityTickersText, for
     const result = runScreeningTier_(SCREENING_TIERS[0], cache, maxPages, seedMoney, { bootstrap: true, market });
     if (result.ran) mergePriorityAnalyses_(cache, priorityTickers, seedMoney, market);
     const message = result.ran
-      ? marketLabel_(market) + " 초기 후보 목록을 만들었습니다. 야간 시간에 전체 분석으로 다시 갱신됩니다."
+      ? (result.message || marketLabel_(market) + " 초기 후보 목록을 만들었습니다. 야간 시간에 전체 분석으로 다시 갱신됩니다.")
       : result.reason || marketLabel_(market) + " 초기 후보 목록을 만들지 못했습니다.";
     if (result.ran) {
       cache.updatedAt = now.toISOString();
@@ -1160,7 +1164,7 @@ function screenMarket_(market, pages, limit, seedMoney, priorityTickersText, for
     const result = runScreeningTier_(dueTier, cache, maxPages, seedMoney, { market });
     if (result.ran) {
       refreshedTierId = dueTier.id;
-      runMessage = marketTierLabel_(dueTier, market) + "을(를) 갱신했습니다.";
+      runMessage = result.message || marketTierLabel_(dueTier, market) + "을(를) 갱신했습니다.";
       cache.updatedAt = now.toISOString();
       saveScreeningCache_(cache, market);
     } else {
@@ -1266,6 +1270,9 @@ function runScreeningTier_(tier, cache, pages, seedMoney, options) {
   options = options || {};
   const market = marketCode_(options.market || cache.market);
   if (tier.id === "full_nightly") {
+    if (market === "NASDAQ") {
+      return runNasdaqFullScreeningTier_(tier, cache, pages, options);
+    }
     const stocks = fetchMarketSummaryByMarket_(pages, market);
     const rows = stocks.map(scoreMarketRow_).sort(compareScoreRows_);
     cache.tiers[tier.id] = {
@@ -1309,6 +1316,47 @@ function runScreeningTier_(tier, cache, pages, seedMoney, options) {
     }
   };
   return { ran: true };
+}
+
+function runNasdaqFullScreeningTier_(tier, cache, pages, options) {
+  options = options || {};
+  const baseUniverse = getNasdaqBaseStocks_();
+  const maxItems = Math.min(Math.max(Number(pages || 80), 1) * 50, baseUniverse.length);
+  if (!maxItems) return { ran: false, reason: "나스닥 기준 종목 목록을 가져오지 못했습니다." };
+  const previousTier = cache.tiers[tier.id] || {};
+  const previousRows = Array.isArray(previousTier.rows) ? previousTier.rows : [];
+  const previousMetadata = previousTier.metadata || {};
+  const cursor = Math.max(0, Number(previousMetadata.cursor || 0)) % maxItems;
+  const batchSize = Math.min(NASDAQ_FULL_BATCH_SIZE, maxItems);
+  const batchStocks = [];
+  for (let offset = 0; offset < batchSize; offset += 1) {
+    batchStocks.push(baseUniverse[(cursor + offset) % maxItems]);
+  }
+  const summaryRows = fetchNasdaqMarketSummaryBatch_(batchStocks).map(scoreMarketRow_);
+  const rows = combineRankedRows_(summaryRows, previousRows).slice(0, maxItems);
+  const nextCursor = (cursor + batchSize) % maxItems;
+  cache.tiers[tier.id] = {
+    lastRunAt: new Date().toISOString(),
+    rows,
+    metadata: {
+      selectionBasis: options.bootstrap ? "initial_bootstrap_incremental" : "full_universe_incremental",
+      rowCount: rows.length,
+      mode: tier.mode,
+      market: "NASDAQ",
+      bootstrap: Boolean(options.bootstrap),
+      batchSize,
+      analyzedBatchCount: summaryRows.length,
+      cursor: nextCursor,
+      universeCount: maxItems,
+      coverageCount: rows.length,
+      completedSweep: nextCursor <= cursor
+    }
+  };
+  return {
+    ran: true,
+    partial: rows.length < maxItems || nextCursor !== 0,
+    message: "나스닥 전체 분석 " + summaryRows.length + "개 갱신, 누적 " + rows.length + "/" + maxItems + "개입니다. 전체 커버리지는 여러 번 갱신하면 채워집니다."
+  };
 }
 
 function analyzeTierRows_(tier, sourceRows, seedMoney, cache, market) {
@@ -1489,6 +1537,26 @@ function buildScreeningResponse_(cache, limit, now, refreshedTierId, message, ma
     tierRows,
     items: tierRows[activeTierId].slice(0, limit)
   };
+}
+
+function screeningFallbackResponse_(market, errorMessage) {
+  try {
+    market = marketCode_(market);
+    const cache = normalizeScreeningCache_(loadScreeningCache_(market));
+    cache.market = market;
+    const response = buildScreeningResponse_(
+      cache,
+      200,
+      new Date(),
+      "",
+      marketLabel_(market) + " 갱신은 실패했지만 기존 캐시를 표시합니다. 사유: " + String(errorMessage || "알 수 없는 오류"),
+      market
+    );
+    response.warning = String(errorMessage || "");
+    return response;
+  } catch (fallbackError) {
+    return { ok: false, error: errorMessage || fallbackError.message || String(fallbackError) };
+  }
 }
 
 function combineRankedRows_() {
@@ -1708,7 +1776,11 @@ function fetchMarketSummaryByMarket_(pages, market) {
 function fetchNasdaqMarketSummary_(pages) {
   const baseUniverse = getNasdaqBaseStocks_();
   const maxItems = Math.min(Math.max(Number(pages || 80), 1) * 50, baseUniverse.length);
-  const baseRows = baseUniverse.slice(0, maxItems).map((stock) => ({
+  return fetchNasdaqMarketSummaryBatch_(baseUniverse.slice(0, Math.min(maxItems, NASDAQ_FULL_BATCH_SIZE)));
+}
+
+function fetchNasdaqMarketSummaryBatch_(stocks) {
+  const baseRows = (stocks || []).map((stock) => ({
     ticker: normalizeNasdaqSymbol_(stock.ticker),
     name: stock.name,
     market: "NASDAQ"
@@ -1716,8 +1788,8 @@ function fetchNasdaqMarketSummary_(pages) {
   const byTicker = {};
   baseRows.forEach((row) => { byTicker[row.ticker] = row; });
   const symbols = baseRows.map((row) => row.ticker);
-  for (let index = 0; index < symbols.length; index += 200) {
-    const chunk = symbols.slice(index, index + 200);
+  for (let index = 0; index < symbols.length; index += 100) {
+    const chunk = symbols.slice(index, index + 100);
     try {
       const url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=" + encodeURIComponent(chunk.join(","));
       const payload = JSON.parse(fetchText_(url, "UTF-8"));

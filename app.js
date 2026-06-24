@@ -1503,7 +1503,7 @@ function jsonp(url, params) {
     const timer = setTimeout(() => {
       cleanup();
       reject(new Error("응답 시간이 초과되었습니다."));
-    }, 45000);
+    }, 90000);
     window[callbackName] = (payload) => {
       clearTimeout(timer);
       cleanup();
