@@ -42,6 +42,10 @@ button {
   padding-bottom: calc(72px + env(safe-area-inset-bottom));
 }
 
+.is-hidden {
+  display: none !important;
+}
+
 .topbar {
   position: sticky;
   top: 0;
@@ -352,6 +356,14 @@ select:focus {
   gap: 10px;
 }
 
+.section-actions,
+.candidate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
 .toggle-line {
   display: flex;
   align-items: center;
@@ -393,6 +405,53 @@ select:focus {
   gap: 6px;
 }
 
+.candidate-controls {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin: 10px 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.candidate-controls label,
+.watch-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.candidate-controls input,
+.watch-check input {
+  width: 18px;
+  min-height: 18px;
+}
+
+.plain-summary {
+  margin-top: 12px;
+  padding: 11px;
+  border: 1px solid #cfe3dd;
+  border-radius: 8px;
+  background: #f2faf7;
+}
+
+.plain-summary strong {
+  display: block;
+  font-size: 13px;
+}
+
+.plain-summary p {
+  margin: 5px 0 0;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .market-summary {
   display: grid;
   gap: 8px;
@@ -402,14 +461,15 @@ select:focus {
 
 .tier-grid {
   display: grid;
-  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
   margin: 10px 0 12px;
 }
 
 .tier-card {
   display: grid;
-  gap: 8px;
-  padding: 11px;
+  gap: 5px;
+  padding: 8px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
@@ -417,14 +477,14 @@ select:focus {
 
 .tier-card strong {
   display: block;
-  font-size: 14px;
+  font-size: 12px;
 }
 
 .tier-card span,
 .tier-card small,
 .tier-list-title span {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .tier-card.fresh {
@@ -445,13 +505,13 @@ select:focus {
 .tier-time {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 4px;
 }
 
 .tier-meta span,
 .tier-time span {
-  min-height: 24px;
-  padding: 4px 8px;
+  min-height: 20px;
+  padding: 3px 6px;
   border-radius: 999px;
   background: #eef3f1;
   color: var(--ink);
@@ -481,7 +541,7 @@ select:focus {
   left: 0;
   z-index: 20;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   min-height: calc(64px + env(safe-area-inset-bottom));
   padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
   background: rgba(255, 255, 255, 0.96);

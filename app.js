@@ -6,6 +6,7 @@ const SEED_MONEY_KEY = "aisis-mobile-seed-money-v1";
 const SCREEN_PAGES_KEY = "aisis-mobile-screen-pages-v1";
 const SYNC_DEBOUNCE_MS = 1200;
 const POLL_INTERVAL_MS = 60 * 1000;
+const HOLDINGS_POLL_INTERVAL_MS = 5 * 1000;
 const CANDIDATE_POLL_INTERVAL_MS = 30 * 1000;
 const SEARCH_DEBOUNCE_MS = 220;
 
@@ -23,6 +24,7 @@ let syncTimer = null;
 let activeAnalysis = null;
 let stockUniverse = [];
 let searchTimer = null;
+let transactionFormOpen = false;
 
 const els = {
   syncBadge: document.querySelector("#syncBadge"),
@@ -36,6 +38,7 @@ const els = {
   signalTitle: document.querySelector("#signalTitle"),
   analysisResult: document.querySelector("#analysisResult"),
   transactionForm: document.querySelector("#transactionForm"),
+  openTransactionButton: document.querySelector("#openTransactionButton"),
   editingTransactionId: document.querySelector("#editingTransactionId"),
   txTicker: document.querySelector("#txTicker"),
   txBroker: document.querySelector("#txBroker"),
@@ -48,8 +51,11 @@ const els = {
   refreshHoldingsButton: document.querySelector("#refreshHoldingsButton"),
   positionsList: document.querySelector("#positionsList"),
   screenKospiButton: document.querySelector("#screenKospiButton"),
+  candidateSort: document.querySelector("#candidateSort"),
+  candidateFilters: document.querySelectorAll(".candidate-filter"),
   marketSummary: document.querySelector("#marketSummary"),
   candidateList: document.querySelector("#candidateList"),
+  watchList: document.querySelector("#watchList"),
   settingsForm: document.querySelector("#settingsForm"),
   syncUrl: document.querySelector("#syncUrl"),
   syncToken: document.querySelector("#syncToken"),
@@ -70,6 +76,7 @@ function init() {
     navigator.serviceWorker.register("./sw.js").catch(() => {});
   }
   els.txDate.value = new Date().toISOString().slice(0, 10);
+  toggleTransactionForm(false);
   els.syncUrl.value = localStorage.getItem(SYNC_URL_KEY) || "";
   els.syncToken.value = localStorage.getItem(SYNC_TOKEN_KEY) || "";
   els.seedMoney.value = localStorage.getItem(SEED_MONEY_KEY) || "10000000";
@@ -84,6 +91,7 @@ function init() {
   renderAll();
   syncOnStart();
   setInterval(() => refreshLiveData({ quiet: true }), POLL_INTERVAL_MS);
+  setInterval(() => refreshHoldingsQuotes({ quiet: true }), HOLDINGS_POLL_INTERVAL_MS);
   setInterval(() => refreshCandidateTiers({ quiet: true }), CANDIDATE_POLL_INTERVAL_MS);
 }
 
@@ -105,7 +113,12 @@ function bindEvents() {
   });
   els.refreshAllButton.addEventListener("click", () => refreshLiveData({ quiet: false }));
   els.refreshHoldingsButton.addEventListener("click", () => refreshHoldings());
+  if (els.openTransactionButton) {
+    els.openTransactionButton.addEventListener("click", () => toggleTransactionForm(true));
+  }
   els.screenKospiButton.addEventListener("click", () => screenKospi());
+  if (els.candidateSort) els.candidateSort.addEventListener("change", renderCandidates);
+  els.candidateFilters.forEach((input) => input.addEventListener("change", renderCandidates));
   els.transactionForm.addEventListener("submit", saveTransaction);
   els.settingsForm.addEventListener("submit", saveSettings);
   els.pullButton.addEventListener("click", () => pullSync({ quiet: false }));
@@ -123,7 +136,7 @@ function isViewActive(viewId) {
 
 async function loadStockUniverse() {
   try {
-    const response = await fetch("./kospi_stocks.json?v=20260624-tiers", { cache: "no-store" });
+    const response = await fetch("./kospi_stocks.json?v=20260624-watch", { cache: "no-store" });
     if (!response.ok) throw new Error("stock universe not found");
     const payload = await response.json();
     stockUniverse = Array.isArray(payload.items) ? payload.items : [];
@@ -257,11 +270,15 @@ function normalizeState(payload) {
   };
 }
 
-function saveLocalState({ touch = true, push = true } = {}) {
+function saveLocalState({ touch = true, push = true, immediatePush = false } = {}) {
   if (touch) state.updatedAt = new Date().toISOString();
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   renderAll();
-  if (push) queuePush();
+  if (immediatePush) {
+    pushSync({ quiet: true });
+  } else if (push) {
+    queuePush();
+  }
 }
 
 function renderAll() {
@@ -269,6 +286,7 @@ function renderAll() {
   renderAnalysis(activeAnalysis);
   renderPositions();
   renderCandidates();
+  renderWatchlist();
 }
 
 function renderSyncBadge() {
@@ -326,6 +344,7 @@ function renderAnalysis(analysis) {
   const tone = signalTone(analysis);
   setSignal(tone, analysis.recommendation || "분석 완료", `${analysis.name || analysis.ticker} · ${formatScore(analysis.finalScore)}점`);
   const buyPlan = analysis.buyPlan || [];
+  const plainSummary = buildPlainAnalysisSummary(analysis);
   els.analysisResult.innerHTML = `
     <article class="result-card">
       <div class="card-head">
@@ -343,6 +362,16 @@ function renderAnalysis(analysis) {
         ${metric("PBR", formatNumber(analysis.fundamental?.pbr))}
         ${metric("RSI", formatNumber(analysis.indicators?.rsi14))}
         ${metric("괴리율", formatPercent(analysis.upside))}
+      </div>
+      <div class="metric-grid">
+        ${metric("매출", formatLargeWon(analysis.fundamental?.revenue))}
+        ${metric("영업이익", formatLargeWon(analysis.fundamental?.operatingIncome))}
+        ${metric("매출 성장", formatPercent(analysis.fundamental?.revenueGrowth))}
+        ${metric("영업이익 성장", formatPercent(analysis.fundamental?.operatingIncomeGrowth))}
+      </div>
+      <div class="plain-summary">
+        <strong>쉬운 요약</strong>
+        <p>${escapeHtml(plainSummary)}</p>
       </div>
       <ul class="note-list">
         ${(analysis.reasons || []).map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}
@@ -371,6 +400,47 @@ function signalTone(analysis) {
   if (signal === "green") return "green";
   if (signal === "red") return "red";
   return "yellow";
+}
+
+function buildPlainAnalysisSummary(analysis) {
+  const score = Number(analysis.finalScore || 0);
+  const ratio = fairValueRatio(analysis);
+  const pbr = Number(analysis.fundamental?.pbr);
+  const rsi = Number(analysis.indicators?.rsi14);
+  const volume = Number(analysis.indicators?.volumeZscore);
+  const revenueGrowth = Number(analysis.fundamental?.revenueGrowth);
+  const operatingGrowth = Number(analysis.fundamental?.operatingIncomeGrowth);
+  const good = [];
+  const caution = [];
+
+  if (ratio >= 1.5) good.push(`적정가가 현재가보다 ${formatRatio(ratio)} 높게 계산되어 가격 매력이 큽니다`);
+  else if (ratio >= 1.1) good.push("적정가가 현재가보다 높아 가격 부담은 크지 않습니다");
+  else caution.push("현재가가 적정가와 가깝거나 높아 가격 매력은 약합니다");
+
+  if (Number.isFinite(pbr) && pbr > 0 && pbr <= 1) good.push("PBR이 1보다 낮아 회사 장부가치에 비해 싸게 거래되는 편입니다");
+  else if (Number.isFinite(pbr) && pbr > 2) caution.push("PBR이 높아 자산가치 기준으로는 싸다고 보기 어렵습니다");
+
+  if (Number.isFinite(rsi) && rsi >= 40 && rsi <= 75) good.push("최근 주가 흐름은 무너지지 않고 버티는 모습입니다");
+  else if (Number.isFinite(rsi) && rsi > 80) caution.push("최근 단기 상승이 강해서 급하게 따라 사면 흔들릴 수 있습니다");
+  else if (Number.isFinite(rsi) && rsi < 40) caution.push("최근 주가 힘은 아직 약합니다");
+
+  if (Number.isFinite(volume) && volume > 1.5) good.push("거래량이 평소보다 늘어 시장 관심이 붙었습니다");
+  if (Number.isFinite(revenueGrowth) && revenueGrowth > 0.05) good.push("매출이 전보다 늘어나는 흐름입니다");
+  if (Number.isFinite(operatingGrowth) && operatingGrowth > 0.05) good.push("영업이익도 개선되고 있습니다");
+  if (Number.isFinite(operatingGrowth) && operatingGrowth < -0.1) caution.push("영업이익 흐름은 약해지고 있어 확인이 필요합니다");
+
+  if (analysis.recommendation === "강력 매수") {
+    const goodText = good.slice(0, 3).join(". ") || "가격과 흐름 조건이 좋은 편입니다";
+    return `${goodText}. 점수도 ${formatScore(score)}점으로 높아 강한 후보입니다.${caution.length ? " 다만 " + caution[0] + "." : ""}`;
+  }
+  if (analysis.recommendation === "매수 검토") {
+    const goodText = good.slice(0, 2).join(". ") || "좋은 점이 일부 있습니다";
+    return `${goodText}. 좋은 점은 있지만 ${caution[0] || "일부 조건이 아직 완전히 맞지는 않아"} 바로 확정 매수보다는 확인이 필요합니다.`;
+  }
+  if (analysis.recommendation && analysis.recommendation.includes("관심")) {
+    return `${good[0] || "일부 지표는 나쁘지 않습니다"}. 하지만 ${caution[0] || "매수 조건이 아직 충분하지 않습니다"} 관심 목록에서 더 지켜보는 쪽이 맞습니다.`;
+  }
+  return `${caution[0] || "현재 기준으로 강한 매수 근거가 부족합니다"}. 좋은 신호가 더 생길 때까지 무리해서 살 필요는 없습니다.`;
 }
 
 function getLatestAnalysis() {
@@ -402,8 +472,18 @@ function saveTransaction(event) {
   state.transactions = state.transactions.filter((row) => row.id !== transaction.id);
   state.transactions.push(transaction);
   resetTransactionForm();
-  saveLocalState();
+  toggleTransactionForm(false);
+  saveLocalState({ immediatePush: true });
   setStatus("매수/매도 이력을 저장했습니다.");
+}
+
+function toggleTransactionForm(open = !transactionFormOpen) {
+  transactionFormOpen = Boolean(open);
+  if (!els.transactionForm) return;
+  els.transactionForm.classList.toggle("is-hidden", !transactionFormOpen);
+  if (els.openTransactionButton) {
+    els.openTransactionButton.textContent = transactionFormOpen ? "입력 닫기" : "매수/매도 입력";
+  }
 }
 
 function resetTransactionForm() {
@@ -522,6 +602,45 @@ async function refreshHoldings() {
   switchView("portfolioView");
 }
 
+async function refreshHoldingsQuotes({ quiet = false } = {}) {
+  if (!isViewActive("portfolioView")) return;
+  const positions = calculatePositions(state.transactions);
+  if (!positions.length) return;
+  const config = getSyncConfig();
+  if (!config) return;
+  for (const position of positions) {
+    try {
+      const payload = await jsonp(config.url, {
+        action: "quote",
+        token: config.token,
+        ticker: position.ticker
+      });
+      if (!payload.ok || !payload.quote) continue;
+      const quote = payload.quote;
+      const current = state.analyses[position.ticker] || {
+        ticker: position.ticker,
+        name: position.name,
+        fetchedAt: ""
+      };
+      state.analyses[position.ticker] = normalizeAnalysis({
+        ...current,
+        ticker: position.ticker,
+        name: quote.name || current.name || position.name,
+        currentPrice: quote.currentPrice || current.currentPrice,
+        previousClose: quote.previousClose || current.previousClose,
+        change: quote.change || current.change,
+        changeRate: quote.changeRate || current.changeRate,
+        fetchedAt: new Date().toISOString()
+      });
+    } catch (error) {
+      if (!quiet) setStatus(friendlySyncError(error), "error");
+    }
+  }
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  renderPositions();
+  renderWatchlist();
+}
+
 async function screenKospi() {
   await refreshCandidateTiers({ quiet: false });
 }
@@ -541,7 +660,8 @@ async function refreshCandidateTiers({ quiet = false } = {}) {
       token: config.token,
       pages: localStorage.getItem(SCREEN_PAGES_KEY) || "80",
       limit: "200",
-      seedMoney: localStorage.getItem(SEED_MONEY_KEY) || "0"
+      seedMoney: localStorage.getItem(SEED_MONEY_KEY) || "0",
+      priorityTickers: priorityCandidateTickers().join(",")
     });
     if (!payload.ok) throw new Error(payload.error || "후보 갱신 실패");
     state.screening = normalizeScreeningPayload(payload);
@@ -575,7 +695,8 @@ function renderCandidates() {
       const tier = tiers.find((row) => row.id === tierId) || { id: tierId, label: tierLabel(tierId) };
       const rows = Array.isArray(tierRows[tierId]) ? tierRows[tierId] : [];
       if (!rows.length) return "";
-      const visibleRows = rows.slice(0, tierId === "top_200_hourly" || tierId === "full_nightly" ? 200 : rows.length);
+      const visibleRows = candidateRowsForDisplay(rows).slice(0, tierId === "top_200_hourly" || tierId === "full_nightly" ? 200 : rows.length);
+      if (!visibleRows.length) return "";
       return `
         <section class="tier-section">
           <div class="tier-list-title">
@@ -620,6 +741,8 @@ function renderTierCard(tier) {
 }
 
 function renderCandidateCard(item, index) {
+  const ratio = fairValueRatio(item);
+  const watched = isWatchlisted(item.ticker);
   return `
     <article class="candidate-card">
       <div class="card-head">
@@ -630,11 +753,64 @@ function renderCandidateCard(item, index) {
         <span class="chip">${escapeHtml(item.recommendation || gradeLabel(item.finalScore))}</span>
         <span class="chip">PER ${formatNumber(item.per)}</span>
         <span class="chip">PBR ${formatNumber(item.pbr)}</span>
+        <span class="chip">적정/현재 ${formatRatio(ratio)}</span>
         ${item.currentPrice ? `<span class="chip">현재가 ${formatWon(item.currentPrice)}</span>` : ""}
       </div>
-      <button class="ghost-button" type="button" onclick="openAnalysis('${escapeJs(item.ticker)}')">종목 분석</button>
+      <div class="candidate-actions">
+        <label class="watch-check">
+          <input type="checkbox" ${watched ? "checked" : ""} onchange="toggleWatchlistFromCandidate('${escapeJs(item.ticker)}', '${escapeJs(item.name)}', this.checked)" />
+          <span>관심</span>
+        </label>
+        <button class="ghost-button" type="button" onclick="openAnalysis('${escapeJs(item.ticker)}')">종목 분석</button>
+      </div>
     </article>
   `;
+}
+
+function candidateRowsForDisplay(rows) {
+  const filters = selectedCandidateFilters();
+  return [...rows]
+    .map(normalizeCandidate)
+    .filter((row) => filters.has(candidateGroup(row)))
+    .sort(candidateSortComparator());
+}
+
+function selectedCandidateFilters() {
+  const selected = new Set();
+  els.candidateFilters.forEach((input) => {
+    if (input.checked) selected.add(input.value);
+  });
+  return selected;
+}
+
+function candidateGroup(row) {
+  const recommendation = String(row.recommendation || "");
+  if (recommendation.includes("강력")) return "strong";
+  if (recommendation.includes("매수 검토")) return "review";
+  if (recommendation.includes("관심")) return "watch";
+  if (recommendation.includes("관찰")) return "watch";
+  return "other";
+}
+
+function candidateSortComparator() {
+  const mode = els.candidateSort?.value || "score_desc";
+  return (a, b) => {
+    if (mode === "ratio_desc") return fairValueRatio(b) - fairValueRatio(a) || scoreValue(b) - scoreValue(a);
+    if (mode === "price_asc") return Number(a.currentPrice || 0) - Number(b.currentPrice || 0);
+    if (mode === "name_asc") return String(a.name || "").localeCompare(String(b.name || ""), "ko");
+    return scoreValue(b) - scoreValue(a) || fairValueRatio(b) - fairValueRatio(a);
+  };
+}
+
+function scoreValue(row) {
+  const value = Number(row.finalScore);
+  return Number.isFinite(value) ? value : -1;
+}
+
+function fairValueRatio(row) {
+  const fair = Number(row.fairValue);
+  const current = Number(row.currentPrice);
+  return Number.isFinite(fair) && Number.isFinite(current) && current > 0 ? fair / current : 0;
 }
 
 function tierLabel(tierId) {
@@ -667,8 +843,78 @@ function addWatchlistFromActive() {
     name: activeAnalysis.name,
     addedAt: new Date().toISOString()
   });
-  saveLocalState();
+  saveLocalState({ immediatePush: true });
   setStatus("관심종목에 추가했습니다.");
+}
+
+function toggleWatchlistFromCandidate(ticker, name, checked) {
+  ticker = normalizeTicker(ticker);
+  if (!ticker) return;
+  state.watchlist = state.watchlist.filter((row) => row.ticker !== ticker);
+  if (checked) {
+    const candidate = findCandidateByTicker(ticker);
+    if (candidate) {
+      state.analyses[ticker] = normalizeAnalysis({ ...(state.analyses[ticker] || {}), ...candidate, ticker });
+    }
+    state.watchlist.unshift({
+      ticker,
+      name: displayStockName(ticker, name),
+      addedAt: new Date().toISOString()
+    });
+    setStatus("관심종목에 추가했습니다.");
+  } else {
+    setStatus("관심종목에서 제거했습니다.");
+  }
+  saveLocalState({ immediatePush: true });
+}
+
+function findCandidateByTicker(ticker) {
+  const normalized = normalizeTicker(ticker);
+  const tierRows = state.screening?.tierRows || {};
+  for (const rows of Object.values(tierRows)) {
+    const found = Array.isArray(rows) ? rows.find((row) => normalizeTicker(row.ticker) === normalized) : null;
+    if (found) return found;
+  }
+  return null;
+}
+
+function isWatchlisted(ticker) {
+  const normalized = normalizeTicker(ticker);
+  return Boolean(normalized && state.watchlist.some((row) => row.ticker === normalized));
+}
+
+function renderWatchlist() {
+  if (!els.watchList) return;
+  const rows = state.watchlist.map((row) => {
+    const ticker = normalizeTicker(row.ticker);
+    return normalizeCandidate({
+      ...row,
+      ...(state.analyses[ticker] || {}),
+      ticker,
+      name: row.name || state.analyses[ticker]?.name
+    });
+  });
+  if (!rows.length) {
+    els.watchList.innerHTML = `<div class="empty">관심 종목이 없습니다. 후보나 분석 화면에서 관심을 체크하세요.</div>`;
+    return;
+  }
+  els.watchList.innerHTML = rows.map((row) => `
+    <article class="candidate-card">
+      <div class="card-head">
+        <strong>${escapeHtml(row.name || row.ticker)} <small>${escapeHtml(row.ticker || "")}</small></strong>
+        <span class="chip ${Number(row.finalScore) >= 80 ? "" : "yellow"}">${formatScore(row.finalScore)}점</span>
+      </div>
+      <div class="candidate-meta">
+        <span class="chip">현재가 ${formatWon(row.currentPrice)}</span>
+        <span class="chip">적정가 ${formatWon(row.fairValue)}</span>
+        <span class="chip">적정/현재 ${formatRatio(fairValueRatio(row))}</span>
+      </div>
+      <div class="candidate-actions">
+        <button class="ghost-button" type="button" onclick="openAnalysis('${escapeJs(row.ticker)}')">분석</button>
+        <button class="ghost-button" type="button" onclick="toggleWatchlistFromCandidate('${escapeJs(row.ticker)}', '${escapeJs(row.name)}', false)">삭제</button>
+      </div>
+    </article>
+  `).join("");
 }
 
 function prefillTransactionFromActive() {
@@ -694,6 +940,20 @@ function findRememberedStock(query) {
     ...state.watchlist
   ];
   return rows.find((row) => row.ticker === ticker || normalizeText(row.name || "") === normalized || normalizeText(row.name || "").includes(normalized));
+}
+
+function priorityCandidateTickers() {
+  const tickers = new Set();
+  Object.values(state.analyses || {}).forEach((analysis) => {
+    if (analysis?.ticker) tickers.add(normalizeTicker(analysis.ticker));
+  });
+  state.watchlist.forEach((row) => {
+    if (row?.ticker) tickers.add(normalizeTicker(row.ticker));
+  });
+  calculatePositions(state.transactions).forEach((position) => {
+    if (position?.ticker) tickers.add(normalizeTicker(position.ticker));
+  });
+  return [...tickers].filter(Boolean).slice(0, 40);
 }
 
 function normalizeAnalysis(analysis) {
@@ -908,8 +1168,16 @@ function normalizeText(value) {
 
 function formatWon(value) {
   const number = Number(value);
-  if (!Number.isFinite(number) || number <= 0) return "-";
+  if (!Number.isFinite(number)) return "-";
   return `${Math.round(number).toLocaleString("ko-KR")}원`;
+}
+
+function formatLargeWon(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "-";
+  const eok = number / 100000000;
+  if (Math.abs(eok) >= 1) return `${Math.round(eok).toLocaleString("ko-KR")}억원`;
+  return formatWon(number);
 }
 
 function formatNumber(value) {
@@ -928,6 +1196,12 @@ function formatPercent(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "-";
   return `${(number * 100).toFixed(1)}%`;
+}
+
+function formatRatio(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "-";
+  return `${number.toFixed(2)}배`;
 }
 
 function formatDateTime(value) {

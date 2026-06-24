@@ -69,7 +69,7 @@ function doGet(e) {
     if (action === "quote") return output_({ ok: true, quote: fetchQuote_(params.ticker || params.query) }, callback);
     if (action === "searchStocks") return output_({ ok: true, items: searchStocks_(params.query, Number(params.limit || 20)) }, callback);
     if (action === "analyze") return output_({ ok: true, analysis: analyzeStock_(params.query || params.ticker, Number(params.seedMoney || 0)) }, callback);
-    if (action === "screenKospi") return output_(screenKospi_(Number(params.pages || 80), Number(params.limit || 200), Number(params.seedMoney || 0)), callback);
+    if (action === "screenKospi") return output_(screenKospi_(Number(params.pages || 80), Number(params.limit || 200), Number(params.seedMoney || 0), params.priorityTickers || ""), callback);
     return output_({ ok: false, error: "unknown action" }, callback);
   } catch (error) {
     return output_({ ok: false, error: error.message }, callback);
@@ -273,12 +273,16 @@ function fetchFundamental_(ticker) {
     bps: latestMetric_(text, "BPS"),
     per: latestMetric_(text, "PER"),
     pbr: latestMetric_(text, "PBR"),
-    dividend_yield: dividendYield_(text)
+    dividend_yield: dividendYield_(text),
+    revenue: latestMetricWonFromEok_(text, "\uB9E4\uCD9C\uC561"),
+    operatingIncome: latestMetricWonFromEok_(text, "\uC601\uC5C5\uC774\uC775"),
+    revenueGrowth: metricGrowth_(text, "\uB9E4\uCD9C\uC561"),
+    operatingIncomeGrowth: metricGrowth_(text, "\uC601\uC5C5\uC774\uC775")
   };
 }
 
 function latestMetric_(text, metric) {
-  const row = new RegExp("<th[^>]*>\\s*(?:<strong>)?\\s*" + metric + "\\b[\\s\\S]*?</th>([\\s\\S]*?)</tr>", "i").exec(text);
+  const row = new RegExp("<th[^>]*>\\s*(?:<strong>)?\\s*" + metric + "[\\s\\S]*?</th>([\\s\\S]*?)</tr>", "i").exec(text);
   if (!row) return null;
   const values = [];
   const regex = /<td[^>]*>\s*(?:<em>)?\s*([-+]?\d[\d,]*(?:\.\d+)?)/g;
@@ -288,6 +292,35 @@ function latestMetric_(text, metric) {
     if (value && value > 0) values.push(value);
   }
   return values.length ? values[values.length - 1] : null;
+}
+
+function metricValues_(text, metric, positiveOnly) {
+  const row = new RegExp("<th[^>]*>\\s*(?:<strong>)?\\s*" + metric + "[\\s\\S]*?</th>([\\s\\S]*?)</tr>", "i").exec(text);
+  if (!row) return [];
+  const values = [];
+  const regex = /<td[^>]*>\s*(?:<em>)?\s*([-+]?\d[\d,]*(?:\.\d+)?)/g;
+  let match;
+  while ((match = regex.exec(row[1]))) {
+    const value = toNumber_(match[1]);
+    if (value == null) continue;
+    if (positiveOnly && value <= 0) continue;
+    values.push(value);
+  }
+  return values;
+}
+
+function latestMetricWonFromEok_(text, metric) {
+  const values = metricValues_(text, metric, true);
+  return values.length ? values[values.length - 1] * 100000000 : null;
+}
+
+function metricGrowth_(text, metric) {
+  const values = metricValues_(text, metric, false).filter((value) => value !== 0);
+  if (values.length < 2) return null;
+  const previous = values[values.length - 2];
+  const current = values[values.length - 1];
+  if (!previous) return null;
+  return (current - previous) / Math.abs(previous);
 }
 
 function dividendYield_(text) {
@@ -304,6 +337,10 @@ function mergeCurrentFundamentals_(ticker, currentPrice, fundamental) {
     per: fundamental.per,
     pbr: fundamental.pbr,
     dividend_yield: fundamental.dividend_yield,
+    revenue: fundamental.revenue,
+    operatingIncome: fundamental.operatingIncome,
+    revenueGrowth: fundamental.revenueGrowth,
+    operatingIncomeGrowth: fundamental.operatingIncomeGrowth,
     source: "Naver Finance"
   };
   if (merged.bps && merged.bps > 0 && currentPrice > 0) {
@@ -366,6 +403,7 @@ function calculateFinalScore_(currentPrice, fairValue, indicators, fundamental, 
   const valuationGap = currentPrice > 0 ? fairValue / currentPrice - 1 : 0;
   let valueScore = clamp_(60 + valuationGap * 140);
   let qualityScore = 60;
+  let growthScore = 60;
   let safetyScore = 60;
   if (fundamental.per && fundamental.per > 0 && fundamental.per <= 10) {
     valueScore += 8;
@@ -382,11 +420,25 @@ function calculateFinalScore_(currentPrice, fairValue, indicators, fundamental, 
   }
   if (fundamental.bps && fundamental.bps > 0) qualityScore += 5;
   if (fundamental.dividend_yield && fundamental.dividend_yield > 2) safetyScore += 5;
+  if (fundamental.operatingIncome && fundamental.operatingIncome > 0) {
+    qualityScore += 5;
+    safetyScore += 3;
+  }
+  if (fundamental.revenueGrowth != null) {
+    if (fundamental.revenueGrowth > 0.15) growthScore += 16;
+    else if (fundamental.revenueGrowth > 0.05) growthScore += 8;
+    else if (fundamental.revenueGrowth < -0.10) growthScore -= 8;
+  }
+  if (fundamental.operatingIncomeGrowth != null) {
+    if (fundamental.operatingIncomeGrowth > 0.15) growthScore += 14;
+    else if (fundamental.operatingIncomeGrowth > 0.05) growthScore += 8;
+    else if (fundamental.operatingIncomeGrowth < -0.10) growthScore -= 10;
+  }
   const momentumScore = technicalScore_(indicators);
   const averageVolume = avg_(prices.slice(-20).map((row) => row.volume));
   const tradedValue = averageVolume * currentPrice;
   const liquidityScore = tradedValue >= 20000000000 ? 90 : tradedValue >= 5000000000 ? 80 : tradedValue >= 1000000000 ? 70 : tradedValue >= 100000000 ? 60 : 40;
-  const finalScore = clamp_(valueScore) * 0.2 + clamp_(qualityScore) * 0.25 + 60 * 0.15 + momentumScore * 0.2 + clamp_(safetyScore) * 0.1 + liquidityScore * 0.1;
+  const finalScore = clamp_(valueScore) * 0.2 + clamp_(qualityScore) * 0.25 + clamp_(growthScore) * 0.15 + momentumScore * 0.2 + clamp_(safetyScore) * 0.1 + liquidityScore * 0.1;
   return Math.round(finalScore * 10000) / 10000;
 }
 
@@ -500,13 +552,15 @@ function buildReasons_(finalScore, upside, indicators, fundamental) {
   return reasons;
 }
 
-function screenKospi_(pages, limit, seedMoney) {
+function screenKospi_(pages, limit, seedMoney, priorityTickersText) {
   const maxPages = Math.min(Math.max(Number(pages || 80), 1), 80);
   const maxItems = Math.min(Math.max(Number(limit || 200), 20), 300);
   const cache = normalizeScreeningCache_(loadScreeningCache_());
   const now = new Date();
+  const priorityTickers = parsePriorityTickers_(priorityTickersText);
   if (!tierRows_(cache, "full_nightly").length) {
     const result = runScreeningTier_(SCREENING_TIERS[0], cache, maxPages, seedMoney, { bootstrap: true });
+    if (result.ran) mergePriorityAnalyses_(cache, priorityTickers, seedMoney);
     const message = result.ran
       ? "\uCD08\uAE30 \uD6C4\uBCF4 \uBAA9\uB85D\uC744 \uB9CC\uB4E4\uC5C8\uC2B5\uB2C8\uB2E4. \uC57C\uAC04 \uC2DC\uAC04\uC5D0 \uC804\uCCB4 \uBD84\uC11D\uC73C\uB85C \uB2E4\uC2DC \uAC31\uC2E0\uB429\uB2C8\uB2E4."
       : result.reason || "\uCD08\uAE30 \uD6C4\uBCF4 \uBAA9\uB85D\uC744 \uB9CC\uB4E4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.";
@@ -516,9 +570,12 @@ function screenKospi_(pages, limit, seedMoney) {
     }
     return buildScreeningResponse_(cache, maxItems, now, result.ran ? "full_nightly" : "", message);
   }
+  const priorityResult = mergePriorityAnalyses_(cache, priorityTickers, seedMoney);
   const dueTier = firstDueTier_(cache, now);
   let refreshedTierId = "";
-  let runMessage = "\uC2E4\uD589 \uC8FC\uAE30\uAC00 \uC544\uC9C1 \uC544\uB2D9\uB2C8\uB2E4. \uCE90\uC2DC\uB41C \uD6C4\uBCF4\uB97C \uD45C\uC2DC\uD569\uB2C8\uB2E4.";
+  let runMessage = priorityResult.count
+    ? "\uC774\uBBF8 \uBD84\uC11D/\uAD00\uC2EC/\uBCF4\uC720 \uC885\uBAA9 " + priorityResult.count + "\uAC1C\uB97C \uD6C4\uBCF4 \uC810\uC218\uC5D0 \uBC18\uC601\uD588\uC2B5\uB2C8\uB2E4."
+    : "\uC2E4\uD589 \uC8FC\uAE30\uAC00 \uC544\uC9C1 \uC544\uB2D9\uB2C8\uB2E4. \uCE90\uC2DC\uB41C \uD6C4\uBCF4\uB97C \uD45C\uC2DC\uD569\uB2C8\uB2E4.";
 
   if (dueTier) {
     const result = runScreeningTier_(dueTier, cache, maxPages, seedMoney);
@@ -531,8 +588,78 @@ function screenKospi_(pages, limit, seedMoney) {
       runMessage = result.reason || "\uC120\uD589 \uBD84\uC11D \uACB0\uACFC\uAC00 \uC5C6\uC5B4 \uC2E4\uD589\uD558\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.";
     }
   }
+  if (priorityResult.count && !dueTier) {
+    cache.updatedAt = now.toISOString();
+    saveScreeningCache_(cache);
+  }
 
   return buildScreeningResponse_(cache, maxItems, now, refreshedTierId, runMessage);
+}
+
+function parsePriorityTickers_(value) {
+  const seen = {};
+  return String(value || "")
+    .split(",")
+    .map((raw) => {
+      try {
+        return normalizeTicker_(raw);
+      } catch (error) {
+        return "";
+      }
+    })
+    .filter((ticker) => {
+      if (!ticker || seen[ticker]) return false;
+      seen[ticker] = true;
+      return true;
+    })
+    .slice(0, 40);
+}
+
+function mergePriorityAnalyses_(cache, tickers, seedMoney) {
+  if (!tickers || !tickers.length) return { count: 0 };
+  const fullTier = cache.tiers.full_nightly || { rows: [], metadata: {} };
+  fullTier.rows = Array.isArray(fullTier.rows) ? fullTier.rows : [];
+  let count = 0;
+  tickers.forEach((ticker) => {
+    try {
+      const analysis = analyzeStock_(ticker, seedMoney);
+      const row = analysisToScreenerRow_(analysis, { ticker, name: ticker, market: "KOSPI" });
+      upsertScreenerRow_(fullTier.rows, row);
+      count += 1;
+    } catch (error) {
+      const existing = fullTier.rows.find((row) => row.ticker === ticker);
+      if (!existing) {
+        fullTier.rows.push({
+          ticker,
+          name: ticker,
+          market: "KOSPI",
+          currentPrice: null,
+          fairValue: null,
+          finalScore: null,
+          recommendation: "\uBD84\uC11D \uC2E4\uD328",
+          reason: error.message || "\uC6B0\uC120 \uC885\uBAA9 \uBD84\uC11D \uC2E4\uD328"
+        });
+      }
+    }
+  });
+  fullTier.rows = fullTier.rows.sort(compareScoreRows_);
+  fullTier.lastRunAt = fullTier.lastRunAt || new Date().toISOString();
+  fullTier.metadata = Object.assign({}, fullTier.metadata || {}, {
+    priorityMergedAt: new Date().toISOString(),
+    priorityCount: count,
+    rowCount: fullTier.rows.length
+  });
+  cache.tiers.full_nightly = fullTier;
+  return { count };
+}
+
+function upsertScreenerRow_(rows, row) {
+  const index = rows.findIndex((candidate) => candidate.ticker === row.ticker);
+  if (index >= 0) {
+    rows[index] = Object.assign({}, rows[index], row);
+  } else {
+    rows.push(row);
+  }
 }
 
 function runScreeningTier_(tier, cache, pages, seedMoney, options) {
@@ -728,11 +855,14 @@ function nextWindowStart_(tier, now) {
 
 function buildScreeningResponse_(cache, limit, now, refreshedTierId, message) {
   const fullRows = tierRows_(cache, "full_nightly");
+  const top200Rows = combineRankedRows_(tierRows_(cache, "top_200_hourly"), fullRows).slice(0, 200);
+  const top50Rows = combineRankedRows_(tierRows_(cache, "top_50_5min"), top200Rows).slice(0, 50);
+  const top20Rows = combineRankedRows_(tierRows_(cache, "top_20_realtime"), top50Rows).slice(0, 20);
   const tierRows = {
     full_nightly: fullRows.slice(0, Math.min(limit, 200)),
-    top_200_hourly: tierRows_(cache, "top_200_hourly").slice(0, 200),
-    top_50_5min: tierRows_(cache, "top_50_5min").slice(0, 50),
-    top_20_realtime: tierRows_(cache, "top_20_realtime").slice(0, 20)
+    top_200_hourly: top200Rows,
+    top_50_5min: top50Rows,
+    top_20_realtime: top20Rows
   };
   const activeTierId = ["top_20_realtime", "top_50_5min", "top_200_hourly", "full_nightly"].find((tierId) => tierRows[tierId].length) || "full_nightly";
   const averageScore = fullRows.length ? avg_(fullRows.map((row) => row.finalScore || 0)) : null;
@@ -747,6 +877,26 @@ function buildScreeningResponse_(cache, limit, now, refreshedTierId, message) {
     tierRows,
     items: tierRows[activeTierId].slice(0, limit)
   };
+}
+
+function combineRankedRows_() {
+  const byTicker = {};
+  for (let sourceIndex = 0; sourceIndex < arguments.length; sourceIndex += 1) {
+    const rows = Array.isArray(arguments[sourceIndex]) ? arguments[sourceIndex] : [];
+    rows.forEach((row) => {
+      if (!row || !row.ticker) return;
+      const previous = byTicker[row.ticker];
+      if (!previous || rowScore_(row) >= rowScore_(previous)) {
+        byTicker[row.ticker] = Object.assign({}, previous || {}, row);
+      }
+    });
+  }
+  return Object.values(byTicker).sort(compareScoreRows_);
+}
+
+function rowScore_(row) {
+  const value = Number(row && row.finalScore);
+  return Number.isFinite(value) ? value : -1;
 }
 
 function tierStatusPayload_(tier, cache, now, refreshedTierId) {

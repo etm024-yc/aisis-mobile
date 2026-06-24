@@ -7,7 +7,7 @@
     <meta name="theme-color" content="#0f766e" />
     <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="apple-touch-icon" href="./app-icon.svg" />
-    <link rel="stylesheet" href="./styles.css?v=20260624-tiers" />
+    <link rel="stylesheet" href="./styles.css?v=20260624-watch" />
   </head>
   <body>
     <div class="app-shell">
@@ -42,7 +42,18 @@
         </section>
 
         <section class="view" id="portfolioView">
-          <form class="entry-form" id="transactionForm">
+          <section class="result-section">
+            <div class="section-head">
+              <h2>현재 현황</h2>
+              <div class="section-actions">
+                <button class="ghost-button" id="openTransactionButton" type="button">매수/매도 입력</button>
+                <button class="ghost-button" id="refreshHoldingsButton" type="button">보유 분석</button>
+              </div>
+            </div>
+            <div id="positionsList"></div>
+          </section>
+
+          <form class="entry-form is-hidden" id="transactionForm">
             <input type="hidden" id="editingTransactionId" />
             <div class="form-row two">
               <label>
@@ -89,14 +100,6 @@
             </div>
             <button class="primary-button" type="submit">이력 저장</button>
           </form>
-
-          <section class="result-section">
-            <div class="section-head">
-              <h2>현재 현황</h2>
-              <button class="ghost-button" id="refreshHoldingsButton" type="button">보유 분석</button>
-            </div>
-            <div id="positionsList"></div>
-          </section>
         </section>
 
         <section class="view" id="candidatesView">
@@ -105,7 +108,26 @@
             <button class="primary-button compact" id="screenKospiButton" type="button">티어 갱신</button>
           </div>
           <div class="market-summary" id="marketSummary"></div>
+          <div class="candidate-controls">
+            <select id="candidateSort" aria-label="후보 정렬">
+              <option value="score_desc">점수 높은 순</option>
+              <option value="ratio_desc">적정가 배율 높은 순</option>
+              <option value="price_asc">현재가 낮은 순</option>
+              <option value="name_asc">이름순</option>
+            </select>
+            <label><input class="candidate-filter" type="checkbox" value="strong" checked /> 강력 매수</label>
+            <label><input class="candidate-filter" type="checkbox" value="review" checked /> 매수 검토</label>
+            <label><input class="candidate-filter" type="checkbox" value="watch" checked /> 관심/관찰</label>
+          </div>
           <div id="candidateList"></div>
+        </section>
+
+        <section class="view" id="watchView">
+          <div class="section-head">
+            <h2>관심</h2>
+            <button class="ghost-button compact" type="button" onclick="refreshLiveData({ quiet: false })">새로고침</button>
+          </div>
+          <div id="watchList"></div>
         </section>
 
         <section class="view" id="settingsView">
@@ -146,9 +168,10 @@
         <button class="nav-button active" data-view="analysisView" type="button"><span>⌕</span><b>분석</b></button>
         <button class="nav-button" data-view="portfolioView" type="button"><span>▦</span><b>현황</b></button>
         <button class="nav-button" data-view="candidatesView" type="button"><span>★</span><b>후보</b></button>
+        <button class="nav-button" data-view="watchView" type="button"><span>♡</span><b>관심</b></button>
         <button class="nav-button" data-view="settingsView" type="button"><span>⚙</span><b>설정</b></button>
       </nav>
     </div>
-    <script src="./app.js?v=20260624-tiers"></script>
+    <script src="./app.js?v=20260624-watch"></script>
   </body>
 </html>
