@@ -525,8 +525,8 @@ function renderAnalysis(analysis) {
         ${metric("괴리율", formatPercent(analysis.upside))}
       </div>
       <div class="metric-grid">
-        ${metric("매출", formatLargeWon(analysis.fundamental?.revenue))}
-        ${metric("영업이익", formatLargeWon(analysis.fundamental?.operatingIncome))}
+        ${metric("매출", formatLargeMoney(analysis.fundamental?.revenue, analysisMarket))}
+        ${metric("영업이익", formatLargeMoney(analysis.fundamental?.operatingIncome, analysisMarket))}
         ${metric("매출 성장", formatPercent(analysis.fundamental?.revenueGrowth))}
         ${metric("영업이익 성장", formatPercent(analysis.fundamental?.operatingIncomeGrowth))}
       </div>
@@ -1615,6 +1615,21 @@ function formatLargeWon(value) {
   const eok = number / 100000000;
   if (Math.abs(eok) >= 1) return `${Math.round(eok).toLocaleString("ko-KR")}억원`;
   return formatWon(number);
+}
+
+function formatLargeMoney(value, market = "KOSPI") {
+  if (normalizeMarket(market) !== "NASDAQ") return formatLargeWon(value);
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "-";
+  const billion = number / 1000000000;
+  if (Math.abs(billion) >= 1) {
+    return `$${billion.toLocaleString("en-US", { maximumFractionDigits: 1 })}B`;
+  }
+  const million = number / 1000000;
+  if (Math.abs(million) >= 1) {
+    return `$${million.toLocaleString("en-US", { maximumFractionDigits: 1 })}M`;
+  }
+  return formatDollar(number);
 }
 
 function formatShares(value) {

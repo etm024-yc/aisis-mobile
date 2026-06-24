@@ -263,7 +263,9 @@ function analyzeStock_(query, seedMoney, market) {
     buyPlan,
     reasons: buildReasons_(finalScore, upside, indicators, fundamental),
     fetchedAt: new Date().toISOString(),
-    source: market === "NASDAQ" ? "Yahoo Finance + AISIS mobile" : "Naver Finance + AISIS mobile"
+    source: market === "NASDAQ"
+      ? ((fundamental && fundamental.source ? fundamental.source + " + " : "") + "AISIS mobile")
+      : "Naver Finance + AISIS mobile"
   };
 }
 
@@ -568,7 +570,19 @@ function fetchNasdaqFundamental_(ticker, quote) {
   } catch (error) {
     naverFundamental = null;
   }
-  return mergeNasdaqFundamental_(fallback, yahooFundamental, naverFundamental, quote);
+  let nasdaqSummary = null;
+  try {
+    nasdaqSummary = fetchNasdaqSummaryFundamental_(ticker);
+  } catch (error) {
+    nasdaqSummary = null;
+  }
+  let nasdaqFinancials = null;
+  try {
+    nasdaqFinancials = fetchNasdaqFinancialFundamental_(ticker);
+  } catch (error) {
+    nasdaqFinancials = null;
+  }
+  return mergeNasdaqFundamental_(fallback, yahooFundamental, naverFundamental, nasdaqSummary, nasdaqFinancials, quote);
 }
 
 function fetchYahooQuoteSummary_(ticker, modules) {
@@ -587,36 +601,101 @@ function yahooNumber_(value) {
 function fetchNaverWorldFundamental_(ticker) {
   ticker = normalizeNasdaqSymbol_(ticker);
   const url = "https://m.stock.naver.com/worldstock/stock/" + encodeURIComponent(ticker + ".O") + "/total";
-  const text = stripTags_(fetchText_(url, "UTF-8")).replace(/\s+/g, " ");
+  const html = fetchText_(url, "UTF-8");
+  const text = stripTags_(html).replace(/\s+/g, " ");
   return {
     ticker,
-    eps: naverWorldMetric_(text, "EPS"),
-    bps: naverWorldMetric_(text, "BPS"),
-    per: naverWorldMetric_(text, "PER"),
-    pbr: naverWorldMetric_(text, "PBR"),
-    dividend_yield: naverWorldMetric_(text, "배당수익률"),
+    eps: firstNumber_(naverWorldHtmlMetric_(html, "EPS"), naverWorldJsonMetric_(html, "EPS"), naverWorldMetric_(text, "EPS")),
+    bps: firstNumber_(naverWorldHtmlMetric_(html, "BPS"), naverWorldJsonMetric_(html, "BPS"), naverWorldMetric_(text, "BPS")),
+    per: firstNumber_(naverWorldHtmlMetric_(html, "PER"), naverWorldJsonMetric_(html, "PER"), naverWorldMetric_(text, "PER")),
+    pbr: firstNumber_(naverWorldHtmlMetric_(html, "PBR"), naverWorldJsonMetric_(html, "PBR"), naverWorldMetric_(text, "PBR")),
+    dividend_yield: firstNumber_(naverWorldJsonMetric_(html, "배당수익률"), naverWorldMetric_(text, "배당수익률")),
     source: "Naver Pay Securities"
   };
 }
 
-function mergeNasdaqFundamental_(fallback, yahooFundamental, naverFundamental, quote) {
+function fetchNasdaqSummaryFundamental_(ticker) {
+  ticker = normalizeNasdaqSymbol_(ticker);
+  const url = "https://api.nasdaq.com/api/quote/" + encodeURIComponent(ticker) + "/summary?assetclass=stocks";
+  const payload = JSON.parse(fetchText_(url, "UTF-8"));
+  const summary = (((payload || {}).data || {}).summaryData || {});
+  return {
+    ticker,
+    marketCap: nasdaqSummaryNumber_(summary.MarketCap),
+    dividend_yield: nasdaqSummaryNumber_(summary.Yield),
+    volume: nasdaqSummaryNumber_(summary.ShareVolume),
+    source: "Nasdaq official summary"
+  };
+}
+
+function fetchNasdaqFinancialFundamental_(ticker) {
+  ticker = normalizeNasdaqSymbol_(ticker);
+  const url = "https://api.nasdaq.com/api/company/" + encodeURIComponent(ticker) + "/financials?frequency=1";
+  const payload = JSON.parse(fetchText_(url, "UTF-8"));
+  const data = (payload || {}).data || {};
+  const incomeRows = (((data.incomeStatementTable || {}).rows) || []);
+  const balanceRows = (((data.balanceSheetTable || {}).rows) || []);
+  const revenueValues = nasdaqFinancialRowValues_(incomeRows, "Total Revenue");
+  const operatingValues = nasdaqFinancialRowValues_(incomeRows, "Operating Income");
+  const netIncomeValues = nasdaqFinancialRowValues_(incomeRows, "Net Income");
+  const equityValues = nasdaqFinancialRowValues_(balanceRows, "Total Equity");
+  return {
+    ticker,
+    revenue: revenueValues[0] || null,
+    operatingIncome: operatingValues[0] || null,
+    netIncome: netIncomeValues[0] || null,
+    totalEquity: equityValues[0] || null,
+    revenueGrowth: growthFromPair_(revenueValues[0], revenueValues[1]),
+    operatingIncomeGrowth: growthFromPair_(operatingValues[0], operatingValues[1]),
+    source: "Nasdaq official financials"
+  };
+}
+
+function mergeNasdaqFundamental_(fallback, yahooFundamental, naverFundamental, nasdaqSummary, nasdaqFinancials, quote) {
   const merged = Object.assign({}, fallback, yahooFundamental || {});
-  if (naverFundamental) {
+  [naverFundamental, nasdaqSummary, nasdaqFinancials].forEach((source) => {
+    if (!source) return;
     ["eps", "bps", "per", "pbr", "dividend_yield", "revenue", "operatingIncome", "revenueGrowth", "operatingIncomeGrowth"].forEach((key) => {
-      merged[key] = firstNumber_(merged[key], naverFundamental[key]);
+      merged[key] = firstNumber_(merged[key], source[key]);
     });
-  }
+    merged.marketCap = firstNumber_(merged.marketCap, source.marketCap);
+    merged.netIncome = firstNumber_(merged.netIncome, source.netIncome);
+    merged.totalEquity = firstNumber_(merged.totalEquity, source.totalEquity);
+  });
   const currentPrice = nullableNumber_(quote && quote.currentPrice);
+  const marketCap = nullableNumber_(merged.marketCap);
+  const totalEquity = nullableNumber_(merged.totalEquity);
+  const netIncome = nullableNumber_(merged.netIncome);
+  const shares = marketCap && currentPrice ? marketCap / currentPrice : null;
+  if (merged.bps == null && totalEquity && shares) merged.bps = totalEquity / shares;
+  if (merged.eps == null && netIncome && shares) merged.eps = netIncome / shares;
   if (merged.per == null && merged.eps && currentPrice) merged.per = currentPrice / merged.eps;
   if (merged.pbr == null && merged.bps && currentPrice) merged.pbr = currentPrice / merged.bps;
+  if (merged.pbr == null && marketCap && totalEquity) merged.pbr = marketCap / totalEquity;
   const sources = [];
   if (yahooFundamental && yahooFundamental.source && yahooFundamental.source !== fallback.source) sources.push(yahooFundamental.source);
   if (naverFundamental && naverFundamental.source) sources.push(naverFundamental.source);
+  if (nasdaqSummary && nasdaqSummary.source) sources.push(nasdaqSummary.source);
+  if (nasdaqFinancials && nasdaqFinancials.source) sources.push(nasdaqFinancials.source);
   merged.source = sources.length ? sources.join(" + ") : fallback.source;
-  if (naverFundamental && (naverFundamental.per != null || naverFundamental.pbr != null)) {
-    merged.note = "Yahoo 재무지표를 우선 사용하고, 비어 있는 PER/PBR/EPS/BPS/배당 값은 네이버 해외증권으로 보강했습니다.";
+  if (sources.length > 1) {
+    merged.note = "Yahoo, 네이버 해외증권, Nasdaq 공식 재무제표를 교차 사용하고, 빈 PER/PBR/EPS/BPS는 시총·자본·순이익으로 역산했습니다.";
   }
   return merged;
+}
+
+function naverWorldHtmlMetric_(html, label) {
+  const escaped = escapeRegex_(label);
+  const regex = new RegExp("<strong[^>]*>\\s*" + escaped + "[\\s\\S]*?</strong>\\s*<span[^>]*>\\s*([^<]+)", "i");
+  const match = regex.exec(html || "");
+  return match ? toNumber_(match[1]) : null;
+}
+
+function naverWorldJsonMetric_(html, label) {
+  const escaped = escapeRegex_(label);
+  const regex = new RegExp("\"key\"\\s*:\\s*\"" + escaped + "\"[\\s\\S]{0,240}?\"value\"\\s*:\\s*\"([^\"]+)\"", "i");
+  const match = regex.exec(html || "");
+  return match ? toNumber_(match[1]) : null;
 }
 
 function naverWorldMetric_(text, label) {
@@ -630,6 +709,31 @@ function naverWorldMetric_(text, label) {
     if (match) return toNumber_(match[1]);
   }
   return null;
+}
+
+function nasdaqSummaryNumber_(item) {
+  if (!item || typeof item !== "object") return null;
+  return toNumber_(item.value);
+}
+
+function nasdaqFinancialRowValues_(rows, label) {
+  const row = (rows || []).find((item) => String(item.value1 || "").toLowerCase() === String(label || "").toLowerCase());
+  if (!row) return [];
+  return ["value2", "value3", "value4", "value5"]
+    .map((key) => nasdaqFinancialNumber_(row[key]))
+    .filter((value) => value != null);
+}
+
+function nasdaqFinancialNumber_(value) {
+  const number = toNumber_(value);
+  return number == null ? null : number * 1000;
+}
+
+function growthFromPair_(current, previous) {
+  current = nullableNumber_(current);
+  previous = nullableNumber_(previous);
+  if (current == null || previous == null || previous === 0) return null;
+  return (current - previous) / Math.abs(previous);
 }
 
 function firstNumber_() {
@@ -1697,12 +1801,20 @@ function rowNumbers_(row) {
 }
 
 function fetchText_(url, charset) {
+  const headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36 AISIS-Mobile/1.0",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
+  };
+  if (/api\.nasdaq\.com/i.test(url)) {
+    headers.Accept = "application/json,text/plain,*/*";
+    headers.Origin = "https://www.nasdaq.com";
+    headers.Referer = "https://www.nasdaq.com/";
+  } else if (/naver\.com/i.test(url)) {
+    headers.Referer = "https://m.stock.naver.com/";
+  }
   const response = UrlFetchApp.fetch(url, {
     muteHttpExceptions: true,
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36 AISIS-Mobile/1.0",
-      "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
-    }
+    headers
   });
   const code = response.getResponseCode();
   if (code < 200 || code >= 300) throw new Error("데이터 요청 실패: HTTP " + code);

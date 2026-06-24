@@ -1,4 +1,4 @@
-const CACHE_NAME = "aisis-mobile-v11-work-banner";
+const CACHE_NAME = "aisis-mobile-v12-nasdaq-finance";
 const ASSETS = ["./", "./index.html", "./styles.css", "./app.js", "./kospi_stocks.json", "./manifest.webmanifest", "./app-icon.svg"];
 
 self.addEventListener("install", (event) => {
