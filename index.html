@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>AISIS 모바일</title>
+    <meta name="theme-color" content="#0f766e" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="./app-icon.svg" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <strong>AISIS</strong>
+          <span id="syncBadge">로컬</span>
+        </div>
+        <button class="icon-button" id="refreshAllButton" type="button" title="새로고침" aria-label="새로고침">↻</button>
+      </header>
+
+      <main>
+        <section class="view active" id="analysisView">
+          <div class="search-panel">
+            <label>
+              <span>종목 코드 또는 기업명</span>
+              <input id="stockQuery" type="search" inputmode="search" autocomplete="off" placeholder="예: 005490, SGC에너지" />
+            </label>
+            <button class="primary-button" id="analyzeButton" type="button">분석</button>
+          </div>
+
+          <div class="signal-board" id="signalBoard">
+            <div class="traffic-light neutral" id="trafficLight"></div>
+            <div>
+              <span id="signalLabel">분석 대기</span>
+              <strong id="signalTitle">종목을 입력하세요</strong>
+            </div>
+          </div>
+
+          <section class="result-section" id="analysisResult"></section>
+        </section>
+
+        <section class="view" id="portfolioView">
+          <form class="entry-form" id="transactionForm">
+            <input type="hidden" id="editingTransactionId" />
+            <div class="form-row two">
+              <label>
+                <span>종목</span>
+                <input id="txTicker" required inputmode="search" placeholder="종목코드/기업명" />
+              </label>
+              <label>
+                <span>증권사</span>
+                <input id="txBroker" required placeholder="예: 미래에셋" />
+              </label>
+            </div>
+            <div class="form-row two">
+              <label>
+                <span>구분</span>
+                <select id="txSide">
+                  <option value="매수">매수</option>
+                  <option value="매도">매도</option>
+                </select>
+              </label>
+              <label>
+                <span>일자</span>
+                <input id="txDate" type="date" required />
+              </label>
+            </div>
+            <div class="form-row two">
+              <label>
+                <span>수량</span>
+                <input id="txQuantity" type="number" min="0" step="0.0001" inputmode="decimal" required />
+              </label>
+              <label>
+                <span>단가</span>
+                <input id="txPrice" type="number" min="0" step="1" inputmode="numeric" required />
+              </label>
+            </div>
+            <div class="form-row two">
+              <label>
+                <span>수수료/세금</span>
+                <input id="txFee" type="number" min="0" step="1" inputmode="numeric" value="0" />
+              </label>
+              <label>
+                <span>메모</span>
+                <input id="txMemo" placeholder="선택" />
+              </label>
+            </div>
+            <button class="primary-button" type="submit">이력 저장</button>
+          </form>
+
+          <section class="result-section">
+            <div class="section-head">
+              <h2>현재 현황</h2>
+              <button class="ghost-button" id="refreshHoldingsButton" type="button">보유 분석</button>
+            </div>
+            <div id="positionsList"></div>
+          </section>
+        </section>
+
+        <section class="view" id="candidatesView">
+          <div class="section-head">
+            <h2>매수 후보</h2>
+            <button class="primary-button compact" id="screenKospiButton" type="button">점수 갱신</button>
+          </div>
+          <div class="market-summary" id="marketSummary"></div>
+          <div id="candidateList"></div>
+        </section>
+
+        <section class="view" id="settingsView">
+          <form class="entry-form" id="settingsForm">
+            <label>
+              <span>Apps Script URL</span>
+              <input id="syncUrl" type="url" placeholder="https://script.google.com/macros/s/..." />
+            </label>
+            <label>
+              <span>동기화 비밀번호</span>
+              <input id="syncToken" type="password" autocomplete="current-password" />
+            </label>
+            <div class="form-row two">
+              <label>
+                <span>시드머니</span>
+                <input id="seedMoney" type="number" min="0" step="10000" inputmode="numeric" />
+              </label>
+              <label>
+                <span>코스피 페이지</span>
+                <input id="screenPages" type="number" min="1" max="80" step="1" inputmode="numeric" />
+              </label>
+            </div>
+            <label class="toggle-line">
+              <input id="autoSync" type="checkbox" />
+              <span>자동 동기화</span>
+            </label>
+            <div class="button-grid">
+              <button class="primary-button" type="submit">설정 저장</button>
+              <button class="ghost-button" id="pullButton" type="button">불러오기</button>
+              <button class="ghost-button" id="pushButton" type="button">올리기</button>
+            </div>
+          </form>
+          <div class="status-box" id="statusBox">준비됨</div>
+        </section>
+      </main>
+
+      <nav class="bottom-nav" aria-label="주요 화면">
+        <button class="nav-button active" data-view="analysisView" type="button"><span>⌕</span><b>분석</b></button>
+        <button class="nav-button" data-view="portfolioView" type="button"><span>▦</span><b>현황</b></button>
+        <button class="nav-button" data-view="candidatesView" type="button"><span>★</span><b>후보</b></button>
+        <button class="nav-button" data-view="settingsView" type="button"><span>⚙</span><b>설정</b></button>
+      </nav>
+    </div>
+    <script src="./app.js"></script>
+  </body>
+</html>
