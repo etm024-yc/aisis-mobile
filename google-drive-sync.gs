@@ -55,6 +55,87 @@ const SCREENING_TIERS = [
     sourceTierId: "top_50_5min"
   }
 ];
+const NASDAQ_BASE_STOCKS = [
+  { ticker: "AAPL", name: "Apple" },
+  { ticker: "MSFT", name: "Microsoft" },
+  { ticker: "NVDA", name: "NVIDIA" },
+  { ticker: "AMZN", name: "Amazon" },
+  { ticker: "META", name: "Meta Platforms" },
+  { ticker: "GOOGL", name: "Alphabet Class A" },
+  { ticker: "GOOG", name: "Alphabet Class C" },
+  { ticker: "AVGO", name: "Broadcom" },
+  { ticker: "TSLA", name: "Tesla" },
+  { ticker: "COST", name: "Costco" },
+  { ticker: "NFLX", name: "Netflix" },
+  { ticker: "AMD", name: "AMD" },
+  { ticker: "PEP", name: "PepsiCo" },
+  { ticker: "CSCO", name: "Cisco" },
+  { ticker: "ADBE", name: "Adobe" },
+  { ticker: "LIN", name: "Linde" },
+  { ticker: "TMUS", name: "T-Mobile US" },
+  { ticker: "INTU", name: "Intuit" },
+  { ticker: "QCOM", name: "Qualcomm" },
+  { ticker: "AMAT", name: "Applied Materials" },
+  { ticker: "TXN", name: "Texas Instruments" },
+  { ticker: "ISRG", name: "Intuitive Surgical" },
+  { ticker: "CMCSA", name: "Comcast" },
+  { ticker: "AMGN", name: "Amgen" },
+  { ticker: "HON", name: "Honeywell" },
+  { ticker: "BKNG", name: "Booking Holdings" },
+  { ticker: "VRTX", name: "Vertex Pharmaceuticals" },
+  { ticker: "PANW", name: "Palo Alto Networks" },
+  { ticker: "ADP", name: "ADP" },
+  { ticker: "SBUX", name: "Starbucks" },
+  { ticker: "GILD", name: "Gilead Sciences" },
+  { ticker: "MU", name: "Micron" },
+  { ticker: "ADI", name: "Analog Devices" },
+  { ticker: "LRCX", name: "Lam Research" },
+  { ticker: "MELI", name: "MercadoLibre" },
+  { ticker: "MDLZ", name: "Mondelez" },
+  { ticker: "KLAC", name: "KLA" },
+  { ticker: "REGN", name: "Regeneron" },
+  { ticker: "SNPS", name: "Synopsys" },
+  { ticker: "CDNS", name: "Cadence Design Systems" },
+  { ticker: "CRWD", name: "CrowdStrike" },
+  { ticker: "MAR", name: "Marriott" },
+  { ticker: "ORLY", name: "O'Reilly Automotive" },
+  { ticker: "CSX", name: "CSX" },
+  { ticker: "PYPL", name: "PayPal" },
+  { ticker: "ABNB", name: "Airbnb" },
+  { ticker: "NXPI", name: "NXP Semiconductors" },
+  { ticker: "ROP", name: "Roper Technologies" },
+  { ticker: "MNST", name: "Monster Beverage" },
+  { ticker: "PCAR", name: "PACCAR" },
+  { ticker: "WDAY", name: "Workday" },
+  { ticker: "FTNT", name: "Fortinet" },
+  { ticker: "MRVL", name: "Marvell" },
+  { ticker: "ADSK", name: "Autodesk" },
+  { ticker: "CPRT", name: "Copart" },
+  { ticker: "KDP", name: "Keurig Dr Pepper" },
+  { ticker: "PAYX", name: "Paychex" },
+  { ticker: "AEP", name: "American Electric Power" },
+  { ticker: "CHTR", name: "Charter Communications" },
+  { ticker: "KHC", name: "Kraft Heinz" },
+  { ticker: "MCHP", name: "Microchip Technology" },
+  { ticker: "ROST", name: "Ross Stores" },
+  { ticker: "EXC", name: "Exelon" },
+  { ticker: "FAST", name: "Fastenal" },
+  { ticker: "CTAS", name: "Cintas" },
+  { ticker: "ODFL", name: "Old Dominion Freight Line" },
+  { ticker: "EA", name: "Electronic Arts" },
+  { ticker: "VRSK", name: "Verisk" },
+  { ticker: "IDXX", name: "IDEXX Laboratories" },
+  { ticker: "BKR", name: "Baker Hughes" },
+  { ticker: "XEL", name: "Xcel Energy" },
+  { ticker: "GEHC", name: "GE HealthCare" },
+  { ticker: "LULU", name: "Lululemon" },
+  { ticker: "DDOG", name: "Datadog" },
+  { ticker: "ZS", name: "Zscaler" },
+  { ticker: "TEAM", name: "Atlassian" },
+  { ticker: "DXCM", name: "DexCom" },
+  { ticker: "BIIB", name: "Biogen" },
+  { ticker: "ILMN", name: "Illumina" }
+];
 
 function doGet(e) {
   const params = e.parameter || {};
@@ -70,7 +151,7 @@ function doGet(e) {
     if (action === "quote") return output_({ ok: true, quote: fetchQuoteByMarket_(params.ticker || params.query, market) }, callback);
     if (action === "searchStocks") return output_({ ok: true, items: searchStocksByMarket_(params.query, Number(params.limit || 20), market) }, callback);
     if (action === "analyze") return output_({ ok: true, analysis: analyzeStock_(params.query || params.ticker, Number(params.seedMoney || 0), market) }, callback);
-    if (action === "screenKospi") return output_(screenKospi_(Number(params.pages || 80), Number(params.limit || 200), Number(params.seedMoney || 0), params.priorityTickers || ""), callback);
+    if (action === "screenKospi" || action === "screenMarket") return output_(screenMarket_(market, Number(params.pages || 80), Number(params.limit || 200), Number(params.seedMoney || 0), params.priorityTickers || ""), callback);
     return output_({ ok: false, error: "unknown action" }, callback);
   } catch (error) {
     return output_({ ok: false, error: error.message }, callback);
@@ -236,10 +317,13 @@ function searchStocksByMarket_(query, limit, market) {
 
 function resolveNasdaqStock_(query) {
   const raw = String(query || "").trim();
+  const firstToken = normalizeNasdaqSymbol_(raw.split(/\s+/)[0]);
+  const baseBySymbol = findNasdaqBaseBySymbol_(firstToken);
+  if (baseBySymbol) return Object.assign({}, baseBySymbol, { market: "NASDAQ" });
+  const baseByName = searchNasdaqBaseStocks_(raw, 1)[0];
+  if (baseByName) return baseByName;
   const symbol = normalizeNasdaqSymbol_(query);
-  if (symbol && raw.toUpperCase() === symbol && symbol.length <= 6 && /^[A-Z][A-Z0-9.\-]{0,5}$/.test(symbol)) {
-    return { ticker: symbol, name: "", market: "NASDAQ" };
-  }
+  if (symbol && raw.toUpperCase() === symbol && symbol.length <= 6 && /^[A-Z][A-Z0-9.\-]{0,5}$/.test(symbol)) return { ticker: symbol, name: "", market: "NASDAQ" };
   const found = searchNasdaqStocks_(query, 1)[0];
   if (!found) throw new Error("나스닥 종목을 찾지 못했습니다. 예: AAPL, MSFT, NVDA");
   return found;
@@ -249,71 +333,124 @@ function searchNasdaqStocks_(query, limit) {
   const raw = String(query || "").trim();
   if (!raw) return [];
   const maxItems = Math.max(1, Math.min(Number(limit || 20), 20));
-  const url = "https://query1.finance.yahoo.com/v1/finance/search?q=" + encodeURIComponent(raw) + "&quotesCount=" + maxItems + "&newsCount=0";
-  const payload = JSON.parse(fetchText_(url, "UTF-8"));
-  const quotes = Array.isArray(payload.quotes) ? payload.quotes : [];
-  const items = [];
+  const items = searchNasdaqBaseStocks_(raw, maxItems);
   const seen = {};
-  quotes.forEach((quote) => {
-    const symbol = normalizeNasdaqSymbol_(quote.symbol);
-    if (!symbol || seen[symbol]) return;
-    const quoteType = String(quote.quoteType || "").toUpperCase();
-    const exchange = String(quote.exchange || quote.exchDisp || "").toUpperCase();
-    if (quoteType && quoteType !== "EQUITY" && quoteType !== "ETF") return;
-    if (exchange && exchange.indexOf("NMS") < 0 && exchange.indexOf("NGM") < 0 && exchange.indexOf("NASDAQ") < 0) return;
-    seen[symbol] = true;
-    items.push({
-      ticker: symbol,
-      name: quote.shortname || quote.longname || symbol,
-      market: "NASDAQ"
+  items.forEach((item) => { seen[item.ticker] = true; });
+  try {
+    const url = "https://query1.finance.yahoo.com/v1/finance/search?q=" + encodeURIComponent(raw) + "&quotesCount=" + maxItems + "&newsCount=0";
+    const payload = JSON.parse(fetchText_(url, "UTF-8"));
+    const quotes = Array.isArray(payload.quotes) ? payload.quotes : [];
+    quotes.forEach((quote) => {
+      const symbol = normalizeNasdaqSymbol_(quote.symbol);
+      if (!symbol || seen[symbol]) return;
+      const quoteType = String(quote.quoteType || "").toUpperCase();
+      const exchange = String(quote.exchange || quote.exchDisp || "").toUpperCase();
+      if (quoteType && quoteType !== "EQUITY" && quoteType !== "ETF") return;
+      if (exchange && exchange.indexOf("NMS") < 0 && exchange.indexOf("NGM") < 0 && exchange.indexOf("NASDAQ") < 0) return;
+      seen[symbol] = true;
+      items.push({
+        ticker: symbol,
+        name: quote.shortname || quote.longname || symbol,
+        market: "NASDAQ"
+      });
     });
-  });
+  } catch (error) {
+    // Yahoo search may rate-limit Apps Script. The built-in NASDAQ base keeps mobile search usable.
+  }
   const symbol = normalizeNasdaqSymbol_(raw);
   if (!items.length && symbol) items.push({ ticker: symbol, name: symbol, market: "NASDAQ" });
   return items.slice(0, maxItems);
 }
 
+function searchNasdaqBaseStocks_(query, limit) {
+  const raw = String(query || "").trim();
+  const normalized = normalizeText_(raw);
+  const symbol = normalizeNasdaqSymbol_(raw);
+  const rows = NASDAQ_BASE_STOCKS.map((stock) => {
+    const ticker = normalizeNasdaqSymbol_(stock.ticker);
+    const nameText = normalizeText_(stock.name);
+    let score = 0;
+    if (ticker === symbol || normalizeText_(ticker) === normalized) score = 100;
+    else if (ticker.indexOf(symbol) === 0 && symbol) score = 90;
+    else if (nameText === normalized) score = 85;
+    else if (nameText.indexOf(normalized) >= 0 && normalized) score = 70;
+    return score ? { ticker, name: stock.name, market: "NASDAQ", _score: score } : null;
+  }).filter(Boolean);
+  return rows.sort((a, b) => b._score - a._score || String(a.ticker).localeCompare(String(b.ticker))).slice(0, Math.max(1, Number(limit || 20))).map((row) => {
+    delete row._score;
+    return row;
+  });
+}
+
+function findNasdaqBaseBySymbol_(symbol) {
+  symbol = normalizeNasdaqSymbol_(symbol);
+  if (!symbol) return null;
+  const found = NASDAQ_BASE_STOCKS.find((stock) => normalizeNasdaqSymbol_(stock.ticker) === symbol);
+  return found ? { ticker: normalizeNasdaqSymbol_(found.ticker), name: found.name } : null;
+}
+
 function fetchNasdaqQuote_(query) {
   const ticker = normalizeNasdaqSymbol_(query);
-  const result = fetchNasdaqChart_(ticker, "5d", "1d");
-  const meta = result.meta || {};
-  const quote = (((result.indicators || {}).quote || [])[0]) || {};
-  const closes = (quote.close || []).filter((value) => value != null).map(Number);
-  const volumes = (quote.volume || []).filter((value) => value != null).map(Number);
-  const currentPrice = nullableNumber_(meta.regularMarketPrice) || last_(closes) || 0;
-  const previousClose = nullableNumber_(meta.previousClose);
-  return {
-    ticker,
-    name: meta.shortName || meta.longName || ticker,
-    market: "NASDAQ",
-    currentPrice,
-    previousClose,
-    change: previousClose ? currentPrice - previousClose : null,
-    changeRate: previousClose ? ((currentPrice - previousClose) / previousClose) * 100 : null,
-    volume: nullableNumber_(meta.regularMarketVolume) || last_(volumes) || null
-  };
+  try {
+    const result = fetchNasdaqChart_(ticker, "5d", "1d");
+    const meta = result.meta || {};
+    const quote = (((result.indicators || {}).quote || [])[0]) || {};
+    const closes = (quote.close || []).filter((value) => value != null).map(Number);
+    const volumes = (quote.volume || []).filter((value) => value != null).map(Number);
+    const currentPrice = nullableNumber_(meta.regularMarketPrice) || last_(closes) || 0;
+    const previousClose = nullableNumber_(meta.previousClose);
+    return {
+      ticker,
+      name: meta.shortName || meta.longName || (findNasdaqBaseBySymbol_(ticker) || {}).name || ticker,
+      market: "NASDAQ",
+      currentPrice,
+      previousClose,
+      change: previousClose ? currentPrice - previousClose : null,
+      changeRate: previousClose ? ((currentPrice - previousClose) / previousClose) * 100 : null,
+      volume: nullableNumber_(meta.regularMarketVolume) || last_(volumes) || null
+    };
+  } catch (error) {
+    const prices = fetchStooqDailyPrices_(ticker, 5);
+    const current = last_(prices);
+    const previous = prices.length > 1 ? prices[prices.length - 2] : null;
+    const previousClose = previous ? previous.close : null;
+    return {
+      ticker,
+      name: (findNasdaqBaseBySymbol_(ticker) || {}).name || ticker,
+      market: "NASDAQ",
+      currentPrice: current ? current.close : 0,
+      previousClose,
+      change: previousClose && current ? current.close - previousClose : null,
+      changeRate: previousClose && current ? ((current.close - previousClose) / previousClose) * 100 : null,
+      volume: current ? current.volume : null
+    };
+  }
 }
 
 function fetchNasdaqDailyPrices_(query, count) {
   const ticker = normalizeNasdaqSymbol_(query);
-  const result = fetchNasdaqChart_(ticker, "1y", "1d");
-  const timestamps = result.timestamp || [];
-  const quote = (((result.indicators || {}).quote || [])[0]) || {};
-  const rows = [];
-  timestamps.forEach((stamp, index) => {
-    const close = nullableNumber_((quote.close || [])[index]);
-    if (close == null) return;
-    rows.push({
-      date: Utilities.formatDate(new Date(Number(stamp) * 1000), "GMT", "yyyyMMdd"),
-      open: nullableNumber_((quote.open || [])[index]) || close,
-      high: nullableNumber_((quote.high || [])[index]) || close,
-      low: nullableNumber_((quote.low || [])[index]) || close,
-      close,
-      volume: nullableNumber_((quote.volume || [])[index]) || 0
+  try {
+    const result = fetchNasdaqChart_(ticker, "1y", "1d");
+    const timestamps = result.timestamp || [];
+    const quote = (((result.indicators || {}).quote || [])[0]) || {};
+    const rows = [];
+    timestamps.forEach((stamp, index) => {
+      const close = nullableNumber_((quote.close || [])[index]);
+      if (close == null) return;
+      rows.push({
+        date: Utilities.formatDate(new Date(Number(stamp) * 1000), "GMT", "yyyyMMdd"),
+        open: nullableNumber_((quote.open || [])[index]) || close,
+        high: nullableNumber_((quote.high || [])[index]) || close,
+        low: nullableNumber_((quote.low || [])[index]) || close,
+        close,
+        volume: nullableNumber_((quote.volume || [])[index]) || 0
+      });
     });
-  });
-  if (!rows.length) throw new Error("나스닥 일봉 데이터를 가져오지 못했습니다.");
-  return rows.slice(-Number(count || 260));
+    if (!rows.length) throw new Error("나스닥 일봉 데이터를 가져오지 못했습니다.");
+    return rows.slice(-Number(count || 260));
+  } catch (error) {
+    return fetchStooqDailyPrices_(ticker, count);
+  }
 }
 
 function fetchNasdaqChart_(ticker, range, interval) {
@@ -343,6 +480,28 @@ function fetchNasdaqFundamental_(ticker, quote) {
     source: "Yahoo Finance chart",
     note: "나스닥 모바일 분석은 현재 가격, 거래량, 이동평균, RSI 중심으로 계산합니다."
   };
+}
+
+function fetchStooqDailyPrices_(ticker, count) {
+  ticker = normalizeNasdaqSymbol_(ticker);
+  const url = "https://stooq.com/q/d/l/?s=" + encodeURIComponent(ticker.toLowerCase() + ".us") + "&i=d";
+  const text = fetchText_(url, "UTF-8");
+  const rows = text.split(/\r?\n/).slice(1).map((line) => {
+    const parts = line.split(",");
+    if (parts.length < 6 || !/\d{4}-\d{2}-\d{2}/.test(parts[0])) return null;
+    const close = nullableNumber_(parts[4]);
+    if (close == null) return null;
+    return {
+      date: parts[0].replace(/-/g, ""),
+      open: nullableNumber_(parts[1]) || close,
+      high: nullableNumber_(parts[2]) || close,
+      low: nullableNumber_(parts[3]) || close,
+      close,
+      volume: nullableNumber_(parts[5]) || 0
+    };
+  }).filter(Boolean);
+  if (!rows.length) throw new Error("나스닥 일봉 데이터를 가져오지 못했습니다.");
+  return rows.slice(-Number(count || 260));
 }
 
 function fetchQuote_(query) {
@@ -690,57 +849,60 @@ function buildReasons_(finalScore, upside, indicators, fundamental) {
   return reasons;
 }
 
-function screenKospi_(pages, limit, seedMoney, priorityTickersText) {
+function screenMarket_(market, pages, limit, seedMoney, priorityTickersText) {
+  market = marketCode_(market);
   const maxPages = Math.min(Math.max(Number(pages || 80), 1), 80);
   const maxItems = Math.min(Math.max(Number(limit || 200), 20), 300);
-  const cache = normalizeScreeningCache_(loadScreeningCache_());
+  const cache = normalizeScreeningCache_(loadScreeningCache_(market));
+  cache.market = market;
   const now = new Date();
-  const priorityTickers = parsePriorityTickers_(priorityTickersText);
+  const priorityTickers = parsePriorityTickers_(priorityTickersText, market);
   if (!tierRows_(cache, "full_nightly").length) {
-    const result = runScreeningTier_(SCREENING_TIERS[0], cache, maxPages, seedMoney, { bootstrap: true });
-    if (result.ran) mergePriorityAnalyses_(cache, priorityTickers, seedMoney);
+    const result = runScreeningTier_(SCREENING_TIERS[0], cache, maxPages, seedMoney, { bootstrap: true, market });
+    if (result.ran) mergePriorityAnalyses_(cache, priorityTickers, seedMoney, market);
     const message = result.ran
-      ? "\uCD08\uAE30 \uD6C4\uBCF4 \uBAA9\uB85D\uC744 \uB9CC\uB4E4\uC5C8\uC2B5\uB2C8\uB2E4. \uC57C\uAC04 \uC2DC\uAC04\uC5D0 \uC804\uCCB4 \uBD84\uC11D\uC73C\uB85C \uB2E4\uC2DC \uAC31\uC2E0\uB429\uB2C8\uB2E4."
-      : result.reason || "\uCD08\uAE30 \uD6C4\uBCF4 \uBAA9\uB85D\uC744 \uB9CC\uB4E4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.";
+      ? marketLabel_(market) + " 초기 후보 목록을 만들었습니다. 야간 시간에 전체 분석으로 다시 갱신됩니다."
+      : result.reason || marketLabel_(market) + " 초기 후보 목록을 만들지 못했습니다.";
     if (result.ran) {
       cache.updatedAt = now.toISOString();
-      saveScreeningCache_(cache);
+      saveScreeningCache_(cache, market);
     }
-    return buildScreeningResponse_(cache, maxItems, now, result.ran ? "full_nightly" : "", message);
+    return buildScreeningResponse_(cache, maxItems, now, result.ran ? "full_nightly" : "", message, market);
   }
-  const priorityResult = mergePriorityAnalyses_(cache, priorityTickers, seedMoney);
+  const priorityResult = mergePriorityAnalyses_(cache, priorityTickers, seedMoney, market);
   const dueTier = firstDueTier_(cache, now);
   let refreshedTierId = "";
   let runMessage = priorityResult.count
-    ? "\uC774\uBBF8 \uBD84\uC11D/\uAD00\uC2EC/\uBCF4\uC720 \uC885\uBAA9 " + priorityResult.count + "\uAC1C\uB97C \uD6C4\uBCF4 \uC810\uC218\uC5D0 \uBC18\uC601\uD588\uC2B5\uB2C8\uB2E4."
-    : "\uC2E4\uD589 \uC8FC\uAE30\uAC00 \uC544\uC9C1 \uC544\uB2D9\uB2C8\uB2E4. \uCE90\uC2DC\uB41C \uD6C4\uBCF4\uB97C \uD45C\uC2DC\uD569\uB2C8\uB2E4.";
+    ? "이미 분석/관심/보유 " + marketLabel_(market) + " 종목 " + priorityResult.count + "개를 후보 점수에 반영했습니다."
+    : "실행 주기가 아직 아닙니다. 캐시된 " + marketLabel_(market) + " 후보를 표시합니다.";
 
   if (dueTier) {
-    const result = runScreeningTier_(dueTier, cache, maxPages, seedMoney);
+    const result = runScreeningTier_(dueTier, cache, maxPages, seedMoney, { market });
     if (result.ran) {
       refreshedTierId = dueTier.id;
-      runMessage = dueTier.label + "\uC744(\uB97C) \uAC31\uC2E0\uD588\uC2B5\uB2C8\uB2E4.";
+      runMessage = marketTierLabel_(dueTier, market) + "을(를) 갱신했습니다.";
       cache.updatedAt = now.toISOString();
-      saveScreeningCache_(cache);
+      saveScreeningCache_(cache, market);
     } else {
-      runMessage = result.reason || "\uC120\uD589 \uBD84\uC11D \uACB0\uACFC\uAC00 \uC5C6\uC5B4 \uC2E4\uD589\uD558\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.";
+      runMessage = result.reason || "선행 분석 결과가 없어 실행하지 않았습니다.";
     }
   }
   if (priorityResult.count && !dueTier) {
     cache.updatedAt = now.toISOString();
-    saveScreeningCache_(cache);
+    saveScreeningCache_(cache, market);
   }
 
-  return buildScreeningResponse_(cache, maxItems, now, refreshedTierId, runMessage);
+  return buildScreeningResponse_(cache, maxItems, now, refreshedTierId, runMessage, market);
 }
 
-function parsePriorityTickers_(value) {
+function parsePriorityTickers_(value, market) {
+  market = marketCode_(market);
   const seen = {};
   return String(value || "")
     .split(",")
     .map((raw) => {
       try {
-        return normalizeTicker_(raw);
+        return market === "NASDAQ" ? normalizeNasdaqSymbol_(raw) : normalizeTicker_(raw);
       } catch (error) {
         return "";
       }
@@ -753,15 +915,16 @@ function parsePriorityTickers_(value) {
     .slice(0, 40);
 }
 
-function mergePriorityAnalyses_(cache, tickers, seedMoney) {
+function mergePriorityAnalyses_(cache, tickers, seedMoney, market) {
+  market = marketCode_(market || cache.market);
   if (!tickers || !tickers.length) return { count: 0 };
   const fullTier = cache.tiers.full_nightly || { rows: [], metadata: {} };
   fullTier.rows = Array.isArray(fullTier.rows) ? fullTier.rows : [];
   let count = 0;
   tickers.forEach((ticker) => {
     try {
-      const analysis = analyzeStock_(ticker, seedMoney);
-      const row = analysisToScreenerRow_(analysis, { ticker, name: ticker, market: "KOSPI" });
+      const analysis = analyzeStock_(ticker, seedMoney, market);
+      const row = analysisToScreenerRow_(analysis, { ticker, name: ticker, market });
       upsertScreenerRow_(fullTier.rows, row);
       count += 1;
     } catch (error) {
@@ -770,7 +933,7 @@ function mergePriorityAnalyses_(cache, tickers, seedMoney) {
         fullTier.rows.push({
           ticker,
           name: ticker,
-          market: "KOSPI",
+          market,
           currentPrice: null,
           fairValue: null,
           finalScore: null,
@@ -802,8 +965,9 @@ function upsertScreenerRow_(rows, row) {
 
 function runScreeningTier_(tier, cache, pages, seedMoney, options) {
   options = options || {};
+  const market = marketCode_(options.market || cache.market);
   if (tier.id === "full_nightly") {
-    const stocks = fetchMarketSummary_(pages);
+    const stocks = fetchMarketSummaryByMarket_(pages, market);
     const rows = stocks.map(scoreMarketRow_).sort(compareScoreRows_);
     cache.tiers[tier.id] = {
       lastRunAt: new Date().toISOString(),
@@ -812,6 +976,7 @@ function runScreeningTier_(tier, cache, pages, seedMoney, options) {
         selectionBasis: options.bootstrap ? "initial_bootstrap" : "full_universe",
         rowCount: rows.length,
         mode: tier.mode,
+        market,
         bootstrap: Boolean(options.bootstrap)
       }
     };
@@ -821,13 +986,13 @@ function runScreeningTier_(tier, cache, pages, seedMoney, options) {
   const sourceTier = cache.tiers[tier.sourceTierId] || {};
   const sourceRows = Array.isArray(sourceTier.rows) ? sourceTier.rows.slice().sort(compareScoreRows_) : [];
   if (!sourceRows.length) {
-    return { ran: false, reason: tier.label + "\uC740(\uB294) \uC120\uD589 \uD2F0\uC5B4 \uACB0\uACFC\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4." };
+    return { ran: false, reason: marketTierLabel_(tier, market) + "은(는) 선행 티어 결과가 필요합니다." };
   }
 
   const selected = sourceRows.slice(0, tier.limit || sourceRows.length);
   const deepResult = tier.mode === "light"
-    ? { rows: refreshLightRows_(selected), metadata: { analyzedBatchCount: selected.length, cursor: 0 } }
-    : analyzeTierRows_(tier, selected, seedMoney, cache);
+    ? { rows: refreshLightRows_(selected, market), metadata: { analyzedBatchCount: selected.length, cursor: 0 } }
+    : analyzeTierRows_(tier, selected, seedMoney, cache, market);
   const rows = deepResult.rows.sort(compareScoreRows_);
   cache.tiers[tier.id] = {
     lastRunAt: new Date().toISOString(),
@@ -838,6 +1003,7 @@ function runScreeningTier_(tier, cache, pages, seedMoney, options) {
       sourceRowCount: sourceRows.length,
       rowCount: rows.length,
       mode: tier.mode,
+      market,
       analyzedCount: deepResult.metadata.analyzedCount || 0,
       analyzedBatchCount: deepResult.metadata.analyzedBatchCount || 0,
       cursor: deepResult.metadata.cursor || 0
@@ -846,7 +1012,8 @@ function runScreeningTier_(tier, cache, pages, seedMoney, options) {
   return { ran: true };
 }
 
-function analyzeTierRows_(tier, sourceRows, seedMoney, cache) {
+function analyzeTierRows_(tier, sourceRows, seedMoney, cache, market) {
+  market = marketCode_(market || cache.market);
   const previousRows = tierRows_(cache, tier.id);
   const previousByTicker = {};
   previousRows.forEach((row) => {
@@ -863,7 +1030,7 @@ function analyzeTierRows_(tier, sourceRows, seedMoney, cache) {
   const batch = selectDeepBatch_(tier, sourceRows, cache);
   batch.rows.forEach((row) => {
     try {
-      baseByTicker[row.ticker] = analysisToScreenerRow_(analyzeStock_(row.ticker, seedMoney), row);
+      baseByTicker[row.ticker] = analysisToScreenerRow_(analyzeStock_(row.ticker, seedMoney, row.market || market), row);
     } catch (error) {
       baseByTicker[row.ticker] = Object.assign({}, baseByTicker[row.ticker] || row, {
         recommendation: "\uBD84\uC11D \uC2E4\uD328",
@@ -918,10 +1085,11 @@ function analysisToScreenerRow_(analysis, fallback) {
   };
 }
 
-function refreshLightRows_(sourceRows) {
+function refreshLightRows_(sourceRows, market) {
+  market = marketCode_(market);
   return sourceRows.map((row) => {
     try {
-      const quote = fetchQuote_(row.ticker);
+      const quote = fetchQuoteByMarket_(row.ticker, row.market || market);
       const currentPrice = quote.currentPrice || row.currentPrice;
       const fairValue = row.fairValue || null;
       const upside = fairValue && currentPrice ? fairValue / currentPrice - 1 : row.upside;
@@ -991,7 +1159,8 @@ function nextWindowStart_(tier, now) {
   return new Date(todayStart.getTime() + 24 * 60 * 60 * 1000);
 }
 
-function buildScreeningResponse_(cache, limit, now, refreshedTierId, message) {
+function buildScreeningResponse_(cache, limit, now, refreshedTierId, message, market) {
+  market = marketCode_(market || cache.market);
   const fullRows = tierRows_(cache, "full_nightly");
   const top200Rows = combineRankedRows_(tierRows_(cache, "top_200_hourly"), fullRows).slice(0, 200);
   const top50Rows = combineRankedRows_(tierRows_(cache, "top_50_5min"), top200Rows).slice(0, 50);
@@ -1006,12 +1175,13 @@ function buildScreeningResponse_(cache, limit, now, refreshedTierId, message) {
   const averageScore = fullRows.length ? avg_(fullRows.map((row) => row.finalScore || 0)) : null;
   return {
     ok: true,
+    market,
     updatedAt: cache.updatedAt || "",
     averageScore: averageScore == null ? null : Math.round(averageScore * 10000) / 10000,
     refreshedTierId,
     activeTierId,
     message,
-    tiers: SCREENING_TIERS.map((tier) => tierStatusPayload_(tier, cache, now, refreshedTierId)),
+    tiers: SCREENING_TIERS.map((tier) => tierStatusPayload_(tier, cache, now, refreshedTierId, market)),
     tierRows,
     items: tierRows[activeTierId].slice(0, limit)
   };
@@ -1037,15 +1207,16 @@ function rowScore_(row) {
   return Number.isFinite(value) ? value : -1;
 }
 
-function tierStatusPayload_(tier, cache, now, refreshedTierId) {
+function tierStatusPayload_(tier, cache, now, refreshedTierId, market) {
+  market = marketCode_(market || cache.market);
   const tierCache = cache.tiers[tier.id] || {};
   const rows = Array.isArray(tierCache.rows) ? tierCache.rows : [];
   const metadata = tierCache.metadata || {};
   const nextDueAt = nextTierDueAt_(tier, cache, now);
   return {
     id: tier.id,
-    label: tier.label,
-    scope: tier.scope,
+    label: marketTierLabel_(tier, market),
+    scope: marketTierScope_(tier, market),
     limit: tier.limit,
     intervalMs: tier.intervalMs,
     intervalLabel: intervalLabel_(tier.intervalMs),
@@ -1079,21 +1250,21 @@ function compareScoreRows_(a, b) {
   return String(a.name || "").localeCompare(String(b.name || ""), "ko");
 }
 
-function loadScreeningCache_() {
-  const file = getNamedFile_(SCREENING_FILE_NAME);
+function loadScreeningCache_(market) {
+  const file = getNamedFile_(screeningFileName_(market));
   if (!file) return { tiers: {} };
   const text = file.getBlob().getDataAsString("UTF-8");
   if (!text) return { tiers: {} };
   return JSON.parse(text);
 }
 
-function saveScreeningCache_(cache) {
+function saveScreeningCache_(cache, market) {
   const text = JSON.stringify(cache, null, 2);
-  const file = getNamedFile_(SCREENING_FILE_NAME);
+  const file = getNamedFile_(screeningFileName_(market || cache.market));
   if (file) {
     file.setContent(text);
   } else {
-    getFolder_().createFile(SCREENING_FILE_NAME, text, MimeType.PLAIN_TEXT);
+    getFolder_().createFile(screeningFileName_(market || cache.market), text, MimeType.PLAIN_TEXT);
   }
 }
 
@@ -1108,6 +1279,10 @@ function getNamedFile_(fileName) {
   return files.hasNext() ? files.next() : null;
 }
 
+function screeningFileName_(market) {
+  return marketCode_(market) === "NASDAQ" ? "aisis-mobile-screening-cache-nasdaq.json" : SCREENING_FILE_NAME;
+}
+
 function intervalLabel_(intervalMs) {
   if (intervalMs >= 24 * 60 * 60 * 1000) return Math.round(intervalMs / (24 * 60 * 60 * 1000)) + "\uC77C";
   if (intervalMs >= 60 * 60 * 1000) return Math.round(intervalMs / (60 * 60 * 1000)) + "\uC2DC\uAC04";
@@ -1115,11 +1290,27 @@ function intervalLabel_(intervalMs) {
   return Math.round(intervalMs / 1000) + "\uCD08";
 }
 
+function marketLabel_(market) {
+  return marketCode_(market) === "NASDAQ" ? "나스닥" : "코스피";
+}
+
+function marketTierLabel_(tier, market) {
+  if (tier.id === "full_nightly") return marketLabel_(market) + " 전체 분석";
+  return tier.label;
+}
+
+function marketTierScope_(tier, market) {
+  if (tier.id === "full_nightly") return marketLabel_(market) + " BASE 전체";
+  if (tier.id === "top_200_hourly") return marketLabel_(market) + " 전체 분석 점수 상위 200개";
+  return tier.scope;
+}
+
 function twoDigits_(value) {
   return String(value).padStart(2, "0");
 }
 
 function scoreMarketRow_(stock) {
+  if (marketCode_(stock.market) === "NASDAQ") return scoreNasdaqMarketRow_(stock);
   let valueScore = 60;
   let qualityScore = 60;
   if (stock.per && stock.per > 0 && stock.per <= 10) valueScore += 16;
@@ -1143,6 +1334,89 @@ function scoreMarketRow_(stock) {
     finalScore: rounded,
     recommendation: rounded >= 80 ? "강력 매수 후보" : rounded >= 70 ? "관심 후보" : rounded >= 60 ? "관찰" : "제외"
   };
+}
+
+function scoreNasdaqMarketRow_(stock) {
+  let valueScore = 58;
+  let qualityScore = 60;
+  let growthScore = 60;
+  let momentumScore = 55;
+  let safetyScore = 60;
+  const per = Number(stock.per);
+  const marketCap = Number(stock.marketCap || 0);
+  const currentPrice = Number(stock.currentPrice || 0);
+  const ma50 = Number(stock.ma50 || 0);
+  const ma200 = Number(stock.ma200 || 0);
+  const volume = Number(stock.volume || 0);
+  if (per > 0 && per <= 25) valueScore += 12;
+  else if (per > 25 && per <= 40) valueScore += 4;
+  else if (per > 60) valueScore -= 8;
+  if (marketCap >= 200000000000) safetyScore += 16;
+  else if (marketCap >= 50000000000) safetyScore += 10;
+  else if (marketCap >= 10000000000) safetyScore += 4;
+  if (currentPrice && ma50 && currentPrice >= ma50) momentumScore += 12;
+  if (ma50 && ma200 && ma50 >= ma200) momentumScore += 12;
+  if (Number(stock.changeRate) > 0) momentumScore += 4;
+  if (per > 0 && per <= 35 && marketCap >= 10000000000) qualityScore += 8;
+  if (marketCap >= 50000000000) qualityScore += 8;
+  const tradedValue = currentPrice * volume;
+  const liquidityScore = tradedValue >= 5000000000 ? 90 : tradedValue >= 1000000000 ? 82 : tradedValue >= 250000000 ? 72 : tradedValue >= 50000000 ? 60 : 45;
+  const finalScore = clamp_(valueScore) * 0.2 + clamp_(qualityScore) * 0.25 + clamp_(growthScore) * 0.15 + clamp_(momentumScore) * 0.2 + clamp_(safetyScore) * 0.1 + liquidityScore * 0.1;
+  const rounded = Math.round(finalScore * 10) / 10;
+  return {
+    ticker: stock.ticker,
+    name: stock.name,
+    market: "NASDAQ",
+    currentPrice: stock.currentPrice,
+    marketCap: stock.marketCap,
+    volume: stock.volume,
+    per: stock.per,
+    roe: stock.roe,
+    fairValue: stock.fairValue || null,
+    finalScore: rounded,
+    recommendation: rounded >= 80 ? "강력 매수 후보" : rounded >= 70 ? "관심 후보" : rounded >= 60 ? "관찰" : "제외"
+  };
+}
+
+function fetchMarketSummaryByMarket_(pages, market) {
+  return marketCode_(market) === "NASDAQ" ? fetchNasdaqMarketSummary_(pages) : fetchMarketSummary_(pages);
+}
+
+function fetchNasdaqMarketSummary_(pages) {
+  const maxItems = Math.min(Math.max(Number(pages || 80), 1) * 2, NASDAQ_BASE_STOCKS.length);
+  const baseRows = NASDAQ_BASE_STOCKS.slice(0, maxItems).map((stock) => ({
+    ticker: normalizeNasdaqSymbol_(stock.ticker),
+    name: stock.name,
+    market: "NASDAQ"
+  }));
+  const byTicker = {};
+  baseRows.forEach((row) => { byTicker[row.ticker] = row; });
+  const symbols = baseRows.map((row) => row.ticker);
+  for (let index = 0; index < symbols.length; index += 40) {
+    const chunk = symbols.slice(index, index + 40);
+    try {
+      const url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=" + encodeURIComponent(chunk.join(","));
+      const payload = JSON.parse(fetchText_(url, "UTF-8"));
+      const results = (((payload || {}).quoteResponse || {}).result || []);
+      results.forEach((quote) => {
+        const ticker = normalizeNasdaqSymbol_(quote.symbol);
+        if (!ticker || !byTicker[ticker]) return;
+        byTicker[ticker] = Object.assign({}, byTicker[ticker], {
+          name: quote.shortName || quote.longName || byTicker[ticker].name,
+          currentPrice: nullableNumber_(quote.regularMarketPrice),
+          volume: nullableNumber_(quote.regularMarketVolume),
+          marketCap: nullableNumber_(quote.marketCap),
+          per: nullableNumber_(quote.trailingPE || quote.forwardPE),
+          ma50: nullableNumber_(quote.fiftyDayAverage),
+          ma200: nullableNumber_(quote.twoHundredDayAverage),
+          changeRate: nullableNumber_(quote.regularMarketChangePercent)
+        });
+      });
+    } catch (error) {
+      // Keep static base rows when Yahoo quote batch is temporarily unavailable.
+    }
+  }
+  return Object.values(byTicker);
 }
 
 function fetchMarketSummary_(pages) {
