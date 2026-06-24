@@ -66,6 +66,22 @@ button {
   letter-spacing: 0;
 }
 
+.brand-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#marketSelect {
+  min-height: 32px;
+  padding: 4px 28px 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 13px;
+}
+
 .topbar span {
   display: block;
   margin-top: 2px;
@@ -473,7 +489,11 @@ select:focus {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
-  cursor: pointer;
+}
+
+.candidate-open-button {
+  min-height: 34px;
+  margin-top: 2px;
 }
 
 .tier-card strong {

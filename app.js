@@ -4,11 +4,26 @@ const SYNC_TOKEN_KEY = "aisis-mobile-sync-token-v1";
 const SYNC_AUTO_KEY = "aisis-mobile-sync-auto-v1";
 const SEED_MONEY_KEY = "aisis-mobile-seed-money-v1";
 const SCREEN_PAGES_KEY = "aisis-mobile-screen-pages-v1";
+const MARKET_KEY = "aisis-mobile-market-v1";
 const SYNC_DEBOUNCE_MS = 1200;
 const POLL_INTERVAL_MS = 60 * 1000;
 const HOLDINGS_POLL_INTERVAL_MS = 5 * 1000;
 const CANDIDATE_POLL_INTERVAL_MS = 30 * 1000;
 const SEARCH_DEBOUNCE_MS = 220;
+const NASDAQ_FALLBACK_STOCKS = [
+  { ticker: "AAPL", name: "Apple", market: "NASDAQ" },
+  { ticker: "MSFT", name: "Microsoft", market: "NASDAQ" },
+  { ticker: "NVDA", name: "NVIDIA", market: "NASDAQ" },
+  { ticker: "GOOGL", name: "Alphabet", market: "NASDAQ" },
+  { ticker: "GOOG", name: "Alphabet", market: "NASDAQ" },
+  { ticker: "AMZN", name: "Amazon", market: "NASDAQ" },
+  { ticker: "META", name: "Meta Platforms", market: "NASDAQ" },
+  { ticker: "TSLA", name: "Tesla", market: "NASDAQ" },
+  { ticker: "AVGO", name: "Broadcom", market: "NASDAQ" },
+  { ticker: "COST", name: "Costco", market: "NASDAQ" },
+  { ticker: "NFLX", name: "Netflix", market: "NASDAQ" },
+  { ticker: "AMD", name: "AMD", market: "NASDAQ" }
+];
 
 const defaultState = {
   version: "aisis-mobile-v1",
@@ -31,6 +46,7 @@ let candidateDialogFilters = new Set(["strong", "review", "watch", "other"]);
 
 const els = {
   syncBadge: document.querySelector("#syncBadge"),
+  marketSelect: document.querySelector("#marketSelect"),
   refreshAllButton: document.querySelector("#refreshAllButton"),
   stockQuery: document.querySelector("#stockQuery"),
   stockSuggestions: document.querySelector("#stockSuggestions"),
@@ -42,6 +58,7 @@ const els = {
   analysisResult: document.querySelector("#analysisResult"),
   transactionForm: document.querySelector("#transactionForm"),
   openTransactionButton: document.querySelector("#openTransactionButton"),
+  closeTransactionButton: document.querySelector("#closeTransactionButton"),
   editingTransactionId: document.querySelector("#editingTransactionId"),
   txTicker: document.querySelector("#txTicker"),
   txBroker: document.querySelector("#txBroker"),
@@ -85,6 +102,10 @@ function init() {
   els.syncToken.value = localStorage.getItem(SYNC_TOKEN_KEY) || "";
   els.seedMoney.value = localStorage.getItem(SEED_MONEY_KEY) || "10000000";
   els.screenPages.value = localStorage.getItem(SCREEN_PAGES_KEY) || "80";
+  if (els.marketSelect) {
+    els.marketSelect.value = localStorage.getItem(MARKET_KEY) || "KOSPI";
+    updateMarketPlaceholder();
+  }
   els.autoSync.checked = localStorage.getItem(SYNC_AUTO_KEY) !== "false";
 
   bindEvents();
@@ -103,6 +124,14 @@ function bindEvents() {
   els.navButtons.forEach((button) => {
     button.addEventListener("click", () => switchView(button.dataset.view));
   });
+  if (els.marketSelect) {
+    els.marketSelect.addEventListener("change", () => {
+      localStorage.setItem(MARKET_KEY, selectedMarket());
+      hideStockSuggestions();
+      updateMarketPlaceholder();
+      renderAll();
+    });
+  }
   els.analyzeButton.addEventListener("click", () => analyzeQuery());
   els.stockQuery.addEventListener("input", () => queueStockSearch());
   els.stockQuery.addEventListener("focus", () => queueStockSearch());
@@ -118,7 +147,16 @@ function bindEvents() {
   els.refreshAllButton.addEventListener("click", () => refreshLiveData({ quiet: false }));
   els.refreshHoldingsButton.addEventListener("click", () => refreshHoldings());
   if (els.openTransactionButton) {
-    els.openTransactionButton.addEventListener("click", () => toggleTransactionForm(true));
+    els.openTransactionButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      toggleTransactionForm();
+    });
+  }
+  if (els.closeTransactionButton) {
+    els.closeTransactionButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      toggleTransactionForm(false);
+    });
   }
   els.screenKospiButton.addEventListener("click", () => screenKospi());
   if (els.candidateSort) els.candidateSort.addEventListener("change", renderCandidates);
@@ -181,7 +219,7 @@ async function renderStockSuggestions() {
     .map((stock) => `
       <button class="suggestion-item" type="button" data-ticker="${escapeHtml(stock.ticker)}" data-name="${escapeHtml(stock.name || "")}" data-market="${escapeHtml(stock.market || "KOSPI")}">
         <strong>${escapeHtml(stock.ticker)} · ${escapeHtml(stock.name)}</strong>
-        <span>${escapeHtml(stock.market || "KOSPI")}${stock.current_price ? ` · ${formatWon(stock.current_price)}` : ""}</span>
+        <span>${escapeHtml(marketLabel(stock.market || "KOSPI"))}${stock.current_price || stock.currentPrice ? ` · ${formatPrice(stock.current_price || stock.currentPrice, stock.market)}` : ""}</span>
       </button>
     `)
     .join("");
@@ -205,7 +243,8 @@ async function searchStocksRemotely(query) {
       action: "searchStocks",
       token: config.token,
       query,
-      limit: "12"
+      limit: "12",
+      market: selectedMarket()
     });
     if (!payload.ok) throw new Error(payload.error || "종목 검색 실패");
     return Array.isArray(payload.items) ? payload.items : [];
@@ -216,6 +255,7 @@ async function searchStocksRemotely(query) {
 }
 
 function shouldShowStockSuggestions(query) {
+  if (selectedMarket() === "NASDAQ") return normalizeText(query).length >= 1;
   const digits = query.replace(/\D/g, "");
   if (digits && digits.length >= 4) return true;
   if (!digits && normalizeText(query).length >= 2) return true;
@@ -223,6 +263,7 @@ function shouldShowStockSuggestions(query) {
 }
 
 function searchStockUniverse(query, limit = 12) {
+  if (selectedMarket() === "NASDAQ") return searchNasdaqFallback(query, limit);
   const digits = query.replace(/\D/g, "");
   const normalized = normalizeText(query);
   const scored = [];
@@ -246,10 +287,38 @@ function searchStockUniverse(query, limit = 12) {
     .slice(0, limit);
 }
 
+function searchNasdaqFallback(query, limit = 12) {
+  const raw = String(query || "").trim();
+  const normalized = normalizeText(raw);
+  const symbol = normalizeNasdaqSymbol(raw);
+  const matches = NASDAQ_FALLBACK_STOCKS
+    .map((stock) => {
+      const tickerText = normalizeText(stock.ticker);
+      const nameText = normalizeText(stock.name);
+      let score = 0;
+      if (tickerText === normalized || stock.ticker === symbol) score = 100;
+      else if (tickerText.startsWith(normalized) || stock.ticker.startsWith(symbol)) score = 90;
+      else if (nameText.includes(normalized)) score = 70;
+      return score ? { ...stock, _score: score } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => b._score - a._score || String(a.ticker).localeCompare(String(b.ticker)));
+  if (!matches.length && symbol) matches.push({ ticker: symbol, name: symbol, market: "NASDAQ", _score: 50 });
+  return matches.slice(0, limit);
+}
+
 function selectStockSuggestion(stock) {
-  els.stockQuery.value = `${stock.ticker} ${stock.name}`;
+  const market = normalizeMarket(stock.market || selectedMarket());
+  if (els.marketSelect && market !== selectedMarket()) {
+    els.marketSelect.value = market;
+    localStorage.setItem(MARKET_KEY, market);
+    updateMarketPlaceholder();
+  }
+  els.stockQuery.value = formatStockLabel({ ...stock, market });
   hideStockSuggestions();
-  state.watchlist = state.watchlist.map((row) => (row.ticker === stock.ticker ? { ...row, name: stock.name } : row));
+  state.watchlist = state.watchlist.map((row) => (
+    sameStock(row, { ticker: stock.ticker, market }) ? { ...row, name: stock.name, market } : row
+  ));
 }
 
 function hideStockSuggestions() {
@@ -305,6 +374,21 @@ function renderSyncBadge() {
   els.syncBadge.textContent = hasSync ? "Drive 연결" : "로컬";
 }
 
+function selectedMarket() {
+  return normalizeMarket(els.marketSelect?.value || localStorage.getItem(MARKET_KEY) || "KOSPI");
+}
+
+function updateMarketPlaceholder() {
+  if (!els.stockQuery) return;
+  if (selectedMarket() === "NASDAQ") {
+    els.stockQuery.placeholder = "예: AAPL, MSFT, NVIDIA";
+    if (els.txPrice) els.txPrice.step = "0.01";
+  } else {
+    els.stockQuery.placeholder = "예: 005490, SGC에너지";
+    if (els.txPrice) els.txPrice.step = "1";
+  }
+}
+
 async function analyzeQuery(query = els.stockQuery.value.trim()) {
   if (!query) {
     setStatus("종목 코드나 기업명을 입력하세요.");
@@ -322,6 +406,7 @@ async function analyzeQuery(query = els.stockQuery.value.trim()) {
       action: "analyze",
       token: config.token,
       query,
+      market: selectedMarket(),
       seedMoney: localStorage.getItem(SEED_MONEY_KEY) || "0"
     });
     if (!payload.ok) throw new Error(payload.error || "분석 실패");
@@ -352,6 +437,7 @@ function renderAnalysis(analysis) {
   }
   analysis = normalizeAnalysis(analysis);
   activeAnalysis = analysis;
+  const market = normalizeMarket(analysis.market || selectedMarket());
   const tone = signalTone(analysis);
   setSignal(tone, analysis.recommendation || "분석 완료", `${analysis.name || analysis.ticker} · ${formatScore(analysis.finalScore)}점`);
   const buyPlan = analysis.buyPlan || [];
@@ -363,10 +449,10 @@ function renderAnalysis(analysis) {
         <span class="chip ${tone === "red" ? "red" : tone === "yellow" ? "yellow" : ""}">${escapeHtml(analysis.recommendation || "-")}</span>
       </div>
       <div class="metric-grid">
-        ${metric("현재가", formatWon(analysis.currentPrice))}
-        ${metric("적정가", formatWon(analysis.fairValue))}
+        ${metric("현재가", formatPrice(analysis.currentPrice, market))}
+        ${metric("적정가", formatPrice(analysis.fairValue, market))}
         ${metric("점수", `${formatScore(analysis.finalScore)}점`)}
-        ${metric("손절가", formatWon(analysis.stopLoss))}
+        ${metric("손절가", formatPrice(analysis.stopLoss, market))}
       </div>
       <div class="metric-grid">
         ${metric("PER", formatNumber(analysis.fundamental?.per))}
@@ -393,7 +479,7 @@ function renderAnalysis(analysis) {
       <ul class="note-list">
         ${(analysis.reasons || []).map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}
       </ul>
-      ${buyPlan.length ? `<div class="metric-grid">${buyPlan.map((row) => metric(row.label, `${formatWon(row.price)} · ${row.ratio}%`)).join("")}</div>` : ""}
+      ${buyPlan.length ? `<div class="metric-grid">${buyPlan.map((row) => metric(row.label, `${formatPrice(row.price, market)} · ${row.ratio}%`)).join("")}</div>` : ""}
       <div class="button-grid" style="margin-top:12px">
         <button class="ghost-button" type="button" onclick="addWatchlistFromActive()">관심 추가</button>
         <button class="ghost-button" type="button" onclick="prefillTransactionFromActive()">매수 입력</button>
@@ -468,11 +554,15 @@ function getLatestAnalysis() {
 function saveTransaction(event) {
   event.preventDefault();
   const tickerInput = els.txTicker.value.trim();
-  const remembered = findRememberedStock(tickerInput);
+  const market = selectedMarket();
+  const remembered = findRememberedStock(tickerInput, market);
+  const transactionMarket = normalizeMarket(remembered?.market || market);
+  const transactionTicker = remembered?.ticker || normalizeAnyTicker(tickerInput, transactionMarket) || tickerInput;
   const transaction = {
     id: els.editingTransactionId.value || makeId(),
-    ticker: remembered?.ticker || normalizeTicker(tickerInput) || tickerInput,
+    ticker: transactionTicker,
     name: remembered?.name || tickerInput,
+    market: transactionMarket,
     broker: els.txBroker.value.trim() || "미지정",
     side: els.txSide.value,
     tradeDate: els.txDate.value,
@@ -520,25 +610,26 @@ function renderPositions() {
   }
   els.positionsList.innerHTML = positions
     .map((position) => {
+      const market = normalizeMarket(position.market || "KOSPI");
       const analysis = state.analyses[position.ticker];
-      const displayName = displayStockName(position.ticker, position.name);
+      const displayName = displayStockName(position.ticker, position.name, market);
       const currentPrice = analysis?.currentPrice || 0;
       const evalAmount = currentPrice ? currentPrice * position.quantity : 0;
       const pnl = evalAmount ? evalAmount - position.costBasis : 0;
       return `
-        <article class="position-card" data-ticker="${escapeHtml(position.ticker)}">
+        <article class="position-card" data-ticker="${escapeHtml(position.ticker)}" data-market="${escapeHtml(market)}">
           <div class="position-head">
-            <strong>${escapeHtml(displayName)} <small>${escapeHtml(position.ticker)}</small></strong>
-        <button class="ghost-button" type="button" onclick="openAnalysis('${escapeJs(position.ticker)}')">분석</button>
+            <strong>${escapeHtml(displayName)} <small>${escapeHtml(position.ticker)} · ${escapeHtml(marketLabel(market))}</small></strong>
+        <button class="ghost-button" type="button" onclick="openAnalysis('${escapeJs(position.ticker)}', '${escapeJs(market)}')">분석</button>
           </div>
           <div class="metric-grid">
             ${metric("수량", formatNumber(position.quantity))}
-            ${metric("평단가", formatWon(position.avgPrice))}
-            ${metric("현재가", currentPrice ? formatWon(currentPrice) : "-")}
-            ${metric("평가손익", evalAmount ? formatWon(pnl) : "-")}
+            ${metric("평단가", formatPrice(position.avgPrice, market))}
+            ${metric("현재가", currentPrice ? formatPrice(currentPrice, market) : "-")}
+            ${metric("평가손익", evalAmount ? formatPrice(pnl, market) : "-")}
           </div>
           <div class="broker-list">
-            ${position.brokers.map((broker) => `<div>${escapeHtml(broker.broker)} · ${formatNumber(broker.quantity)}주 · ${formatWon(broker.avgPrice)}</div>`).join("")}
+            ${position.brokers.map((broker) => `<div>${escapeHtml(broker.broker)} · ${formatNumber(broker.quantity)}주 · ${formatPrice(broker.avgPrice, market)}</div>`).join("")}
           </div>
         </article>
       `;
@@ -557,10 +648,13 @@ function calculatePositions(transactions) {
   [...transactions]
     .sort((a, b) => `${a.tradeDate || ""}${a.createdAt || ""}`.localeCompare(`${b.tradeDate || ""}${b.createdAt || ""}`))
     .forEach((tx) => {
-      const key = `${tx.ticker}::${tx.broker}`;
+      const market = normalizeMarket(tx.market || (normalizeTicker(tx.ticker) ? "KOSPI" : "NASDAQ"));
+      const ticker = normalizeAnyTicker(tx.ticker, market) || tx.ticker;
+      const key = `${market}::${ticker}::${tx.broker}`;
       const current = byBroker.get(key) || {
-        ticker: tx.ticker,
+        ticker,
         name: tx.name,
+        market,
         broker: tx.broker,
         quantity: 0,
         costBasis: 0,
@@ -584,9 +678,11 @@ function calculatePositions(transactions) {
     });
   const grouped = new Map();
   [...byBroker.values()].filter((row) => row.quantity > 0).forEach((row) => {
-    const position = grouped.get(row.ticker) || {
+    const groupKey = `${row.market}::${row.ticker}`;
+    const position = grouped.get(groupKey) || {
       ticker: row.ticker,
       name: row.name,
+      market: row.market,
       quantity: 0,
       costBasis: 0,
       realizedPnl: 0,
@@ -603,7 +699,7 @@ function calculatePositions(transactions) {
     position.costBasis += row.costBasis;
     position.realizedPnl += row.realizedPnl;
     position.brokers.push(brokerPosition);
-    grouped.set(row.ticker, position);
+    grouped.set(groupKey, position);
   });
   return [...grouped.values()].map((position) => ({
     ...position,
@@ -614,7 +710,7 @@ function calculatePositions(transactions) {
 async function refreshHoldings() {
   const positions = calculatePositions(state.transactions);
   for (const position of positions) {
-    await analyzeQuery(position.ticker);
+    await openAnalysis(position.ticker, position.market, { stayOnPortfolio: true });
   }
   switchView("portfolioView");
 }
@@ -630,7 +726,8 @@ async function refreshHoldingsQuotes({ quiet = false } = {}) {
       const payload = await jsonp(config.url, {
         action: "quote",
         token: config.token,
-        ticker: position.ticker
+        ticker: position.ticker,
+        market: position.market || "KOSPI"
       });
       if (!payload.ok || !payload.quote) continue;
       const quote = payload.quote;
@@ -642,6 +739,7 @@ async function refreshHoldingsQuotes({ quiet = false } = {}) {
       state.analyses[position.ticker] = normalizeAnalysis({
         ...current,
         ticker: position.ticker,
+        market: position.market || current.market || "KOSPI",
         name: quote.name || current.name || position.name,
         currentPrice: quote.currentPrice || current.currentPrice,
         previousClose: quote.previousClose || current.previousClose,
@@ -812,11 +910,12 @@ function toggleCandidateDialogFilter(value, checked) {
 
 function renderCandidateCard(item, index) {
   const ratio = fairValueRatio(item);
-  const watched = isWatchlisted(item.ticker);
+  const market = normalizeMarket(item.market || "KOSPI");
+  const watched = isWatchlisted(item.ticker, market);
   return `
     <article class="candidate-card">
       <div class="card-head">
-        <strong>${index + 1}. ${escapeHtml(item.name)} <small>${escapeHtml(item.ticker)}</small></strong>
+        <strong>${index + 1}. ${escapeHtml(item.name)} <small>${escapeHtml(item.ticker)} · ${escapeHtml(marketLabel(market))}</small></strong>
         <span class="chip ${Number(item.finalScore) >= 80 ? "" : "yellow"}">${formatScore(item.finalScore)}점</span>
       </div>
       <div class="candidate-meta">
@@ -824,14 +923,14 @@ function renderCandidateCard(item, index) {
         <span class="chip">PER ${formatNumber(item.per)}</span>
         <span class="chip">PBR ${formatNumber(item.pbr)}</span>
         <span class="chip">적정/현재 ${formatRatio(ratio)}</span>
-        ${item.currentPrice ? `<span class="chip">현재가 ${formatWon(item.currentPrice)}</span>` : ""}
+        ${item.currentPrice ? `<span class="chip">현재가 ${formatPrice(item.currentPrice, market)}</span>` : ""}
       </div>
       <div class="candidate-actions">
         <label class="watch-check">
-          <input type="checkbox" ${watched ? "checked" : ""} onchange="toggleWatchlistFromCandidate('${escapeJs(item.ticker)}', '${escapeJs(item.name)}', this.checked)" />
+          <input type="checkbox" ${watched ? "checked" : ""} onchange="toggleWatchlistFromCandidate('${escapeJs(item.ticker)}', '${escapeJs(item.name)}', this.checked, '${escapeJs(market)}')" />
           <span>관심</span>
         </label>
-        <button class="ghost-button" type="button" onclick="openAnalysis('${escapeJs(item.ticker)}')">종목 분석</button>
+        <button class="ghost-button" type="button" onclick="openAnalysis('${escapeJs(item.ticker)}', '${escapeJs(market)}')">종목 분석</button>
       </div>
     </article>
   `;
@@ -899,37 +998,46 @@ function gradeLabel(score) {
   return "제외";
 }
 
-function openAnalysis(query) {
+async function openAnalysis(query, market, options = {}) {
   closeCandidateDialog();
-  switchView("analysisView");
+  const normalizedMarket = normalizeMarket(market || selectedMarket());
+  if (els.marketSelect) {
+    els.marketSelect.value = normalizedMarket;
+    localStorage.setItem(MARKET_KEY, normalizedMarket);
+    updateMarketPlaceholder();
+  }
+  if (!options.stayOnPortfolio) switchView("analysisView");
   els.stockQuery.value = query;
-  analyzeQuery(query);
+  await analyzeQuery(query);
 }
 
 function addWatchlistFromActive() {
   if (!activeAnalysis?.ticker) return;
-  state.watchlist = state.watchlist.filter((row) => row.ticker !== activeAnalysis.ticker);
+  state.watchlist = state.watchlist.filter((row) => !sameStock(row, activeAnalysis));
   state.watchlist.unshift({
     ticker: activeAnalysis.ticker,
     name: activeAnalysis.name,
+    market: activeAnalysis.market || selectedMarket(),
     addedAt: new Date().toISOString()
   });
   saveLocalState({ immediatePush: true });
   setStatus("관심종목에 추가했습니다.");
 }
 
-function toggleWatchlistFromCandidate(ticker, name, checked) {
-  ticker = normalizeTicker(ticker);
+function toggleWatchlistFromCandidate(ticker, name, checked, market = "KOSPI") {
+  market = normalizeMarket(market);
+  ticker = normalizeAnyTicker(ticker, market);
   if (!ticker) return;
-  state.watchlist = state.watchlist.filter((row) => row.ticker !== ticker);
+  state.watchlist = state.watchlist.filter((row) => !sameStock(row, { ticker, market }));
   if (checked) {
-    const candidate = findCandidateByTicker(ticker);
+    const candidate = findCandidateByTicker(ticker, market);
     if (candidate) {
-      state.analyses[ticker] = normalizeAnalysis({ ...(state.analyses[ticker] || {}), ...candidate, ticker });
+      state.analyses[ticker] = normalizeAnalysis({ ...(state.analyses[ticker] || {}), ...candidate, ticker, market });
     }
     state.watchlist.unshift({
       ticker,
-      name: displayStockName(ticker, name),
+      name: displayStockName(ticker, name, market),
+      market,
       addedAt: new Date().toISOString()
     });
     setStatus("관심종목에 추가했습니다.");
@@ -939,29 +1047,33 @@ function toggleWatchlistFromCandidate(ticker, name, checked) {
   saveLocalState({ immediatePush: true });
 }
 
-function findCandidateByTicker(ticker) {
-  const normalized = normalizeTicker(ticker);
+function findCandidateByTicker(ticker, market = "KOSPI") {
+  const normalizedMarket = normalizeMarket(market);
+  const normalized = normalizeAnyTicker(ticker, normalizedMarket);
   const tierRows = state.screening?.tierRows || {};
   for (const rows of Object.values(tierRows)) {
-    const found = Array.isArray(rows) ? rows.find((row) => normalizeTicker(row.ticker) === normalized) : null;
+    const found = Array.isArray(rows) ? rows.find((row) => sameStock(row, { ticker: normalized, market: normalizedMarket })) : null;
     if (found) return found;
   }
   return null;
 }
 
-function isWatchlisted(ticker) {
-  const normalized = normalizeTicker(ticker);
-  return Boolean(normalized && state.watchlist.some((row) => row.ticker === normalized));
+function isWatchlisted(ticker, market = "KOSPI") {
+  const normalizedMarket = normalizeMarket(market);
+  const normalized = normalizeAnyTicker(ticker, normalizedMarket);
+  return Boolean(normalized && state.watchlist.some((row) => sameStock(row, { ticker: normalized, market: normalizedMarket })));
 }
 
 function renderWatchlist() {
   if (!els.watchList) return;
   const rows = state.watchlist.map((row) => {
-    const ticker = normalizeTicker(row.ticker);
+    const market = normalizeMarket(row.market || "KOSPI");
+    const ticker = normalizeAnyTicker(row.ticker, market);
     return normalizeCandidate({
       ...row,
       ...(state.analyses[ticker] || {}),
       ticker,
+      market,
       name: row.name || state.analyses[ticker]?.name
     });
   });
@@ -972,17 +1084,17 @@ function renderWatchlist() {
   els.watchList.innerHTML = rows.map((row) => `
     <article class="candidate-card">
       <div class="card-head">
-        <strong>${escapeHtml(row.name || row.ticker)} <small>${escapeHtml(row.ticker || "")}</small></strong>
+        <strong>${escapeHtml(row.name || row.ticker)} <small>${escapeHtml(row.ticker || "")} · ${escapeHtml(marketLabel(row.market))}</small></strong>
         <span class="chip ${Number(row.finalScore) >= 80 ? "" : "yellow"}">${formatScore(row.finalScore)}점</span>
       </div>
       <div class="candidate-meta">
-        <span class="chip">현재가 ${formatWon(row.currentPrice)}</span>
-        <span class="chip">적정가 ${formatWon(row.fairValue)}</span>
+        <span class="chip">현재가 ${formatPrice(row.currentPrice, row.market)}</span>
+        <span class="chip">적정가 ${formatPrice(row.fairValue, row.market)}</span>
         <span class="chip">적정/현재 ${formatRatio(fairValueRatio(row))}</span>
       </div>
       <div class="candidate-actions">
-        <button class="ghost-button" type="button" onclick="openAnalysis('${escapeJs(row.ticker)}')">분석</button>
-        <button class="ghost-button" type="button" onclick="toggleWatchlistFromCandidate('${escapeJs(row.ticker)}', '${escapeJs(row.name)}', false)">삭제</button>
+        <button class="ghost-button" type="button" onclick="openAnalysis('${escapeJs(row.ticker)}', '${escapeJs(row.market)}')">분석</button>
+        <button class="ghost-button" type="button" onclick="toggleWatchlistFromCandidate('${escapeJs(row.ticker)}', '${escapeJs(row.name)}', false, '${escapeJs(row.market)}')">삭제</button>
       </div>
     </article>
   `).join("");
@@ -990,27 +1102,47 @@ function renderWatchlist() {
 
 function prefillTransactionFromActive() {
   if (!activeAnalysis?.ticker) return;
-  els.txTicker.value = `${activeAnalysis.name} ${activeAnalysis.ticker}`;
+  els.txTicker.value = formatStockLabel(activeAnalysis);
   els.txPrice.value = Math.round(activeAnalysis.currentPrice || 0);
   switchView("portfolioView");
+  toggleTransactionForm(true);
 }
 
 function rememberStock(analysis) {
   if (!analysis?.ticker) return;
   const normalized = normalizeAnalysis(analysis);
-  state.watchlist = state.watchlist.map((row) => (row.ticker === normalized.ticker ? { ...row, name: normalized.name || row.name } : row));
+  state.watchlist = state.watchlist.map((row) => (
+    sameStock(row, normalized) ? { ...row, name: normalized.name || row.name, market: normalized.market || row.market } : row
+  ));
 }
 
-function findRememberedStock(query) {
+function findRememberedStock(query, market = selectedMarket()) {
+  const normalizedMarket = normalizeMarket(market);
   const normalized = normalizeText(query);
-  const ticker = normalizeTicker(query);
-  const local = ticker ? findStockByTicker(ticker) : stockUniverse.find((row) => normalizeText(row.name || "") === normalized || normalizeText(row.name || "").includes(normalized));
+  const ticker = normalizeAnyTicker(query, normalizedMarket);
+  const local = ticker && normalizedMarket === "KOSPI"
+    ? findStockByTicker(ticker)
+    : stockUniverse.find((row) => normalizeText(row.name || "") === normalized || normalizeText(row.name || "").includes(normalized));
   if (local) return local;
+  if (normalizedMarket === "NASDAQ") {
+    const fallback = NASDAQ_FALLBACK_STOCKS.find((row) => (
+      normalizeText(row.ticker) === normalized
+      || row.ticker === ticker
+      || normalizeText(row.name) === normalized
+      || normalizeText(row.name).includes(normalized)
+    ));
+    if (fallback) return fallback;
+  }
   const rows = [
-    ...Object.values(state.analyses || {}).map((analysis) => ({ ticker: analysis.ticker, name: analysis.name })),
+    ...Object.values(state.analyses || {}).map((analysis) => ({ ticker: analysis.ticker, name: analysis.name, market: analysis.market })),
     ...state.watchlist
   ];
-  return rows.find((row) => row.ticker === ticker || normalizeText(row.name || "") === normalized || normalizeText(row.name || "").includes(normalized));
+  return rows.find((row) => (
+    normalizeMarket(row.market || "KOSPI") === normalizedMarket
+    && (normalizeAnyTicker(row.ticker, normalizedMarket) === ticker
+      || normalizeText(row.name || "") === normalized
+      || normalizeText(row.name || "").includes(normalized))
+  ));
 }
 
 function priorityCandidateTickers() {
@@ -1029,15 +1161,17 @@ function priorityCandidateTickers() {
 
 function normalizeAnalysis(analysis) {
   if (!analysis) return analysis;
-  const ticker = normalizeTicker(analysis.ticker || "");
-  const name = displayStockName(ticker, analysis.name);
-  return { ...analysis, ticker: ticker || analysis.ticker, name };
+  const market = normalizeMarket(analysis.market || selectedMarket());
+  const ticker = normalizeAnyTicker(analysis.ticker || "", market) || analysis.ticker;
+  const name = displayStockName(ticker, analysis.name, market);
+  return { ...analysis, market, ticker, name };
 }
 
 function normalizeCandidate(item) {
   if (!item) return item;
-  const ticker = normalizeTicker(item.ticker || "");
-  return { ...item, ticker: ticker || item.ticker, name: displayStockName(ticker, item.name) };
+  const market = normalizeMarket(item.market || "KOSPI");
+  const ticker = normalizeAnyTicker(item.ticker || "", market) || item.ticker;
+  return { ...item, market, ticker, name: displayStockName(ticker, item.name, market) };
 }
 
 function normalizeScreeningPayload(payload) {
@@ -1078,8 +1212,8 @@ function findStockByTicker(ticker) {
   return stockUniverse.find((row) => row.ticker === normalized) || null;
 }
 
-function displayStockName(ticker, fallback) {
-  const local = findStockByTicker(ticker);
+function displayStockName(ticker, fallback, market = "KOSPI") {
+  const local = normalizeMarket(market) === "KOSPI" ? findStockByTicker(ticker) : null;
   if (local?.name) return local.name;
   const clean = cleanStockName(fallback);
   return clean || ticker || "";
@@ -1097,14 +1231,23 @@ function isBrokenText(value) {
 }
 
 function formatStockLabel(stock) {
-  const ticker = normalizeTicker(stock?.ticker || "");
-  const name = displayStockName(ticker, stock?.name);
+  const market = normalizeMarket(stock?.market || selectedMarket());
+  const ticker = normalizeAnyTicker(stock?.ticker || "", market) || stock?.ticker || "";
+  const name = displayStockName(ticker, stock?.name, market);
   return `${ticker} ${name}`.trim();
 }
 
 async function refreshLiveData({ quiet = false } = {}) {
   if (!quiet) setStatus("최신 데이터를 확인하고 있습니다.");
-  if (activeAnalysis?.ticker) await analyzeQuery(activeAnalysis.ticker);
+  if (activeAnalysis?.ticker) {
+    const market = normalizeMarket(activeAnalysis.market || selectedMarket());
+    if (els.marketSelect) {
+      els.marketSelect.value = market;
+      localStorage.setItem(MARKET_KEY, market);
+      updateMarketPlaceholder();
+    }
+    await analyzeQuery(activeAnalysis.ticker);
+  }
   if (!quiet) setStatus("새로고침 완료");
 }
 
@@ -1149,15 +1292,49 @@ async function pullSync({ quiet = false, onlyIfRemoteNewer = false } = {}) {
     if (!payload.ok) throw new Error(payload.error || "불러오기 실패");
     const remote = normalizeState(payload.state || defaultState);
     if (!onlyIfRemoteNewer || String(remote.updatedAt || "") > String(state.updatedAt || "")) {
-      state = remote;
+      state = mergeSyncedState(state, remote);
       repairStateStockNames();
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       renderAll();
+      queuePush();
     }
     if (!quiet) setStatus("Google Drive에서 불러왔습니다.");
   } catch (error) {
     if (!quiet) setStatus(friendlySyncError(error), "error");
   }
+}
+
+function mergeSyncedState(localState, remoteState) {
+  const transactions = mergeByKey(localState.transactions || [], remoteState.transactions || [], (row) => row.id);
+  const watchlist = mergeByKey(localState.watchlist || [], remoteState.watchlist || [], stockMergeKey);
+  return normalizeState({
+    ...localState,
+    ...remoteState,
+    updatedAt: String(remoteState.updatedAt || "") > String(localState.updatedAt || "") ? remoteState.updatedAt : localState.updatedAt,
+    transactions,
+    watchlist,
+    analyses: { ...(remoteState.analyses || {}), ...(localState.analyses || {}) },
+    screening: remoteState.screening || localState.screening
+  });
+}
+
+function stockMergeKey(row) {
+  const market = normalizeMarket(row?.market || "KOSPI");
+  const ticker = normalizeAnyTicker(row?.ticker, market) || row?.ticker;
+  return ticker ? `${market}:${ticker}` : "";
+}
+
+function mergeByKey(localRows, remoteRows, keyFn) {
+  const merged = new Map();
+  remoteRows.forEach((row) => {
+    const key = keyFn(row);
+    if (key) merged.set(key, row);
+  });
+  localRows.forEach((row) => {
+    const key = keyFn(row);
+    if (key) merged.set(key, row);
+  });
+  return Array.from(merged.values());
 }
 
 async function pushSync({ quiet = false } = {}) {
@@ -1228,19 +1405,57 @@ function makeId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
+function normalizeMarket(value) {
+  return String(value || "KOSPI").toUpperCase() === "NASDAQ" ? "NASDAQ" : "KOSPI";
+}
+
+function marketLabel(value) {
+  return normalizeMarket(value) === "NASDAQ" ? "나스닥" : "코스피";
+}
+
 function normalizeTicker(value) {
   const digits = String(value || "").replace(/\D/g, "");
   return digits.length === 6 ? digits : "";
+}
+
+function normalizeNasdaqSymbol(value) {
+  const raw = String(value || "").trim().toUpperCase();
+  const firstToken = raw.split(/\s+/)[0] || raw;
+  return firstToken.replace(/[^A-Z0-9.\-]/g, "").slice(0, 12);
+}
+
+function normalizeAnyTicker(value, market = selectedMarket()) {
+  const kospiTicker = normalizeTicker(value);
+  if (kospiTicker) return kospiTicker;
+  return normalizeMarket(market) === "NASDAQ" ? normalizeNasdaqSymbol(value) : "";
+}
+
+function sameStock(a, b) {
+  const market = normalizeMarket(a?.market || b?.market || "KOSPI");
+  const left = normalizeAnyTicker(a?.ticker, market);
+  const right = normalizeAnyTicker(b?.ticker, market);
+  return Boolean(left && right && normalizeMarket(b?.market || market) === market && left === right);
 }
 
 function normalizeText(value) {
   return String(value || "").normalize("NFKC").toLowerCase().replace(/[\s\-_.(),]/g, "");
 }
 
+function formatPrice(value, market = "KOSPI") {
+  if (normalizeMarket(market) === "NASDAQ") return formatDollar(value);
+  return formatWon(value);
+}
+
 function formatWon(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "-";
   return `${Math.round(number).toLocaleString("ko-KR")}원`;
+}
+
+function formatDollar(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "-";
+  return `$${number.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function formatLargeWon(value) {

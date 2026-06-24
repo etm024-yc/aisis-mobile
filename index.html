@@ -7,13 +7,19 @@
     <meta name="theme-color" content="#0f766e" />
     <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="apple-touch-icon" href="./app-icon.svg" />
-    <link rel="stylesheet" href="./styles.css?v=20260624-candidate-dialog" />
+    <link rel="stylesheet" href="./styles.css?v=20260624-market-sync" />
   </head>
   <body>
     <div class="app-shell">
       <header class="topbar">
         <div>
-          <strong>AISIS</strong>
+          <div class="brand-row">
+            <strong>AISIS</strong>
+            <select id="marketSelect" aria-label="시장 선택">
+              <option value="KOSPI">코스피</option>
+              <option value="NASDAQ">나스닥</option>
+            </select>
+          </div>
           <span id="syncBadge">로컬</span>
         </div>
         <button class="icon-button" id="refreshAllButton" type="button" title="새로고침" aria-label="새로고침">↻</button>
@@ -98,7 +104,10 @@
                 <input id="txMemo" placeholder="선택" />
               </label>
             </div>
-            <button class="primary-button" type="submit">이력 저장</button>
+            <div class="button-grid">
+              <button class="primary-button" type="submit">이력 저장</button>
+              <button class="ghost-button" id="closeTransactionButton" type="button">닫기</button>
+            </div>
           </form>
         </section>
 
@@ -174,6 +183,6 @@
         <button class="nav-button" data-view="settingsView" type="button"><span>⚙</span><b>설정</b></button>
       </nav>
     </div>
-    <script src="./app.js?v=20260624-candidate-dialog"></script>
+    <script src="./app.js?v=20260624-market-sync"></script>
   </body>
 </html>
