@@ -30,6 +30,7 @@ const SCREENING_TIERS = [
     intervalMs: 60 * 60 * 1000,
     mode: "deep",
     modeLabel: "\uC2EC\uCE35 \uBD84\uC11D",
+    batchSize: 12,
     sourceTierId: "full_nightly"
   },
   {
@@ -40,6 +41,7 @@ const SCREENING_TIERS = [
     intervalMs: 5 * 60 * 1000,
     mode: "deep",
     modeLabel: "\uC9D1\uC911 \uBD84\uC11D",
+    batchSize: 8,
     sourceTierId: "top_200_hourly"
   },
   {
@@ -503,6 +505,17 @@ function screenKospi_(pages, limit, seedMoney) {
   const maxItems = Math.min(Math.max(Number(limit || 200), 20), 300);
   const cache = normalizeScreeningCache_(loadScreeningCache_());
   const now = new Date();
+  if (!tierRows_(cache, "full_nightly").length) {
+    const result = runScreeningTier_(SCREENING_TIERS[0], cache, maxPages, seedMoney, { bootstrap: true });
+    const message = result.ran
+      ? "\uCD08\uAE30 \uD6C4\uBCF4 \uBAA9\uB85D\uC744 \uB9CC\uB4E4\uC5C8\uC2B5\uB2C8\uB2E4. \uC57C\uAC04 \uC2DC\uAC04\uC5D0 \uC804\uCCB4 \uBD84\uC11D\uC73C\uB85C \uB2E4\uC2DC \uAC31\uC2E0\uB429\uB2C8\uB2E4."
+      : result.reason || "\uCD08\uAE30 \uD6C4\uBCF4 \uBAA9\uB85D\uC744 \uB9CC\uB4E4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.";
+    if (result.ran) {
+      cache.updatedAt = now.toISOString();
+      saveScreeningCache_(cache);
+    }
+    return buildScreeningResponse_(cache, maxItems, now, result.ran ? "full_nightly" : "", message);
+  }
   const dueTier = firstDueTier_(cache, now);
   let refreshedTierId = "";
   let runMessage = "\uC2E4\uD589 \uC8FC\uAE30\uAC00 \uC544\uC9C1 \uC544\uB2D9\uB2C8\uB2E4. \uCE90\uC2DC\uB41C \uD6C4\uBCF4\uB97C \uD45C\uC2DC\uD569\uB2C8\uB2E4.";
@@ -522,7 +535,8 @@ function screenKospi_(pages, limit, seedMoney) {
   return buildScreeningResponse_(cache, maxItems, now, refreshedTierId, runMessage);
 }
 
-function runScreeningTier_(tier, cache, pages, seedMoney) {
+function runScreeningTier_(tier, cache, pages, seedMoney, options) {
+  options = options || {};
   if (tier.id === "full_nightly") {
     const stocks = fetchMarketSummary_(pages);
     const rows = stocks.map(scoreMarketRow_).sort(compareScoreRows_);
@@ -530,9 +544,10 @@ function runScreeningTier_(tier, cache, pages, seedMoney) {
       lastRunAt: new Date().toISOString(),
       rows,
       metadata: {
-        selectionBasis: "full_universe",
+        selectionBasis: options.bootstrap ? "initial_bootstrap" : "full_universe",
         rowCount: rows.length,
-        mode: tier.mode
+        mode: tier.mode,
+        bootstrap: Boolean(options.bootstrap)
       }
     };
     return { ran: true };
@@ -545,9 +560,10 @@ function runScreeningTier_(tier, cache, pages, seedMoney) {
   }
 
   const selected = sourceRows.slice(0, tier.limit || sourceRows.length);
-  const rows = tier.mode === "light"
-    ? refreshLightRows_(selected)
-    : analyzeTierRows_(selected, seedMoney).sort(compareScoreRows_);
+  const deepResult = tier.mode === "light"
+    ? { rows: refreshLightRows_(selected), metadata: { analyzedBatchCount: selected.length, cursor: 0 } }
+    : analyzeTierRows_(tier, selected, seedMoney, cache);
+  const rows = deepResult.rows.sort(compareScoreRows_);
   cache.tiers[tier.id] = {
     lastRunAt: new Date().toISOString(),
     rows,
@@ -556,23 +572,65 @@ function runScreeningTier_(tier, cache, pages, seedMoney) {
       sourceTierId: tier.sourceTierId,
       sourceRowCount: sourceRows.length,
       rowCount: rows.length,
-      mode: tier.mode
+      mode: tier.mode,
+      analyzedCount: deepResult.metadata.analyzedCount || 0,
+      analyzedBatchCount: deepResult.metadata.analyzedBatchCount || 0,
+      cursor: deepResult.metadata.cursor || 0
     }
   };
   return { ran: true };
 }
 
-function analyzeTierRows_(sourceRows, seedMoney) {
-  return sourceRows.map((row) => {
+function analyzeTierRows_(tier, sourceRows, seedMoney, cache) {
+  const previousRows = tierRows_(cache, tier.id);
+  const previousByTicker = {};
+  previousRows.forEach((row) => {
+    if (row && row.ticker) previousByTicker[row.ticker] = row;
+  });
+  const baseByTicker = {};
+  sourceRows.forEach((row) => {
+    baseByTicker[row.ticker] = previousByTicker[row.ticker] || Object.assign({}, row, {
+      sourceTierScore: row.finalScore || null,
+      reason: row.reason || "\uC120\uD589 \uD2F0\uC5B4 \uC810\uC218 \uC0C1\uC704 \uD6C4\uBCF4"
+    });
+  });
+
+  const batch = selectDeepBatch_(tier, sourceRows, cache);
+  batch.rows.forEach((row) => {
     try {
-      return analysisToScreenerRow_(analyzeStock_(row.ticker, seedMoney), row);
+      baseByTicker[row.ticker] = analysisToScreenerRow_(analyzeStock_(row.ticker, seedMoney), row);
     } catch (error) {
-      return Object.assign({}, row, {
+      baseByTicker[row.ticker] = Object.assign({}, baseByTicker[row.ticker] || row, {
         recommendation: "\uBD84\uC11D \uC2E4\uD328",
         reason: error.message || "\uC2EC\uCE35 \uBD84\uC11D \uC2E4\uD328"
       });
     }
   });
+  const rows = sourceRows.map((row) => baseByTicker[row.ticker] || row);
+  return {
+    rows,
+    metadata: {
+      analyzedCount: rows.filter((row) => row && row.fetchedAt).length,
+      analyzedBatchCount: batch.rows.length,
+      cursor: batch.nextCursor
+    }
+  };
+}
+
+function selectDeepBatch_(tier, sourceRows, cache) {
+  if (!sourceRows.length) return { rows: [], nextCursor: 0 };
+  const tierCache = cache.tiers[tier.id] || {};
+  const metadata = tierCache.metadata || {};
+  const cursor = Math.max(0, Number(metadata.cursor || 0)) % sourceRows.length;
+  const size = Math.min(Math.max(Number(tier.batchSize || 8), 1), sourceRows.length);
+  const rows = [];
+  for (let offset = 0; offset < size; offset += 1) {
+    rows.push(sourceRows[(cursor + offset) % sourceRows.length]);
+  }
+  return {
+    rows,
+    nextCursor: (cursor + size) % sourceRows.length
+  };
 }
 
 function analysisToScreenerRow_(analysis, fallback) {
@@ -629,6 +687,7 @@ function firstDueTier_(cache, now) {
 }
 
 function tierIsDue_(tier, cache, now) {
+  if (tier.sourceTierId && !tierRows_(cache, tier.sourceTierId).length) return false;
   if (!isTierAllowedNow_(tier, now)) return false;
   const lastRunAt = tierLastRunAt_(cache, tier.id);
   if (!lastRunAt) return true;
@@ -710,6 +769,9 @@ function tierStatusPayload_(tier, cache, now, refreshedTierId) {
     isAllowedNow: isTierAllowedNow_(tier, now),
     isDue: tierIsDue_(tier, cache, now),
     rowCount: rows.length,
+    analyzedCount: metadata.analyzedCount || 0,
+    analyzedBatchCount: metadata.analyzedBatchCount || 0,
+    blockedReason: tier.sourceTierId && !tierRows_(cache, tier.sourceTierId).length ? "\uC120\uD589 \uD2F0\uC5B4 \uB300\uAE30" : "",
     refreshed: tier.id === refreshedTierId,
     selectionBasis: metadata.selectionBasis || "",
     sourceRowCount: metadata.sourceRowCount || null

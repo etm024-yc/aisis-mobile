@@ -597,7 +597,7 @@ function renderCandidates() {
 
 function renderTierCard(tier) {
   const statusClass = tier.refreshed ? "fresh" : tier.isDue ? "due" : tier.isAllowedNow ? "ready" : "locked";
-  const statusText = tier.refreshed ? "방금 갱신" : tier.isDue ? "갱신 필요" : tier.isAllowedNow ? "대기" : "시간 전";
+  const statusText = tier.blockedReason || (tier.refreshed ? "방금 갱신" : tier.isDue ? "갱신 필요" : tier.isAllowedNow ? "대기" : "시간 전");
   return `
     <article class="tier-card ${statusClass}">
       <div>
@@ -608,6 +608,7 @@ function renderTierCard(tier) {
         <span>${escapeHtml(tier.intervalLabel || "")}</span>
         <span>${escapeHtml(tier.modeLabel || "")}</span>
         <span>${formatNumber(tier.rowCount || 0)}개</span>
+        ${tier.analyzedCount ? `<span>심층 ${formatNumber(tier.analyzedCount)}개</span>` : ""}
       </div>
       <div class="tier-time">
         <span>${statusText}</span>
