@@ -123,6 +123,13 @@ function bindEvents() {
   els.screenKospiButton.addEventListener("click", () => screenKospi());
   if (els.candidateSort) els.candidateSort.addEventListener("change", renderCandidates);
   els.candidateFilters.forEach((input) => input.addEventListener("change", renderCandidates));
+  if (els.candidateList) {
+    els.candidateList.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-candidate-tier]");
+      if (!button) return;
+      openCandidateTier(button.dataset.candidateTier);
+    });
+  }
   els.transactionForm.addEventListener("submit", saveTransaction);
   els.settingsForm.addEventListener("submit", saveSettings);
   els.pullButton.addEventListener("click", () => pullSync({ quiet: false }));
@@ -710,7 +717,7 @@ function renderTierCard(tier) {
   const statusClass = tier.refreshed ? "fresh" : tier.isDue ? "due" : tier.isAllowedNow ? "ready" : "locked";
   const statusText = tier.blockedReason || (tier.refreshed ? "방금 갱신" : tier.isDue ? "갱신 필요" : tier.isAllowedNow ? "대기" : "시간 전");
   return `
-    <article class="tier-card ${statusClass}" role="button" tabindex="0" onclick="openCandidateTier('${escapeJs(tier.id)}')">
+    <article class="tier-card ${statusClass}" role="button" tabindex="0" data-candidate-tier="${escapeHtml(tier.id || "")}">
       <div>
         <strong>${escapeHtml(tier.label || "")}</strong>
         <span>${escapeHtml(tier.scope || "")}</span>
@@ -726,6 +733,7 @@ function renderTierCard(tier) {
         <small>마지막 ${tier.lastRunAt ? formatDateTime(tier.lastRunAt) : "-"}</small>
         <small>다음 ${tier.nextDueAt ? formatDateTime(tier.nextDueAt) : "-"}</small>
       </div>
+      <button class="ghost-button compact candidate-open-button" type="button">목록 보기</button>
     </article>
   `;
 }
