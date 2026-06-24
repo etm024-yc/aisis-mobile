@@ -76,7 +76,10 @@ function init() {
   els.autoSync.checked = localStorage.getItem(SYNC_AUTO_KEY) !== "false";
 
   bindEvents();
-  loadStockUniverse();
+  loadStockUniverse().then(() => {
+    repairStateStockNames();
+    renderAll();
+  });
   renderAll();
   syncOnStart();
   setInterval(() => refreshLiveData({ quiet: true }), POLL_INTERVAL_MS);
@@ -114,7 +117,7 @@ function switchView(viewId) {
 
 async function loadStockUniverse() {
   try {
-    const response = await fetch("./kospi_stocks.json?v=20260624", { cache: "no-store" });
+    const response = await fetch("./kospi_stocks.json?v=20260624-parity", { cache: "no-store" });
     if (!response.ok) throw new Error("stock universe not found");
     const payload = await response.json();
     stockUniverse = Array.isArray(payload.items) ? payload.items : [];
@@ -284,12 +287,12 @@ async function analyzeQuery(query = els.stockQuery.value.trim()) {
       seedMoney: localStorage.getItem(SEED_MONEY_KEY) || "0"
     });
     if (!payload.ok) throw new Error(payload.error || "분석 실패");
-    activeAnalysis = payload.analysis;
+    activeAnalysis = normalizeAnalysis(payload.analysis);
     if (activeAnalysis && activeAnalysis.ticker) {
       state.analyses[activeAnalysis.ticker] = activeAnalysis;
       rememberStock(activeAnalysis);
       saveLocalState();
-      els.stockQuery.value = `${activeAnalysis.name || ""} ${activeAnalysis.ticker}`.trim();
+      els.stockQuery.value = formatStockLabel(activeAnalysis);
     }
     setStatus("분석을 완료했습니다.");
   } catch (error) {
@@ -309,6 +312,7 @@ function renderAnalysis(analysis) {
     els.analysisResult.innerHTML = `<div class="empty">분석할 종목을 입력하세요.</div>`;
     return;
   }
+  analysis = normalizeAnalysis(analysis);
   activeAnalysis = analysis;
   const tone = signalTone(analysis);
   setSignal(tone, analysis.recommendation || "분석 완료", `${analysis.name || analysis.ticker} · ${formatScore(analysis.finalScore)}점`);
@@ -411,13 +415,14 @@ function renderPositions() {
   els.positionsList.innerHTML = positions
     .map((position) => {
       const analysis = state.analyses[position.ticker];
+      const displayName = displayStockName(position.ticker, position.name);
       const currentPrice = analysis?.currentPrice || 0;
       const evalAmount = currentPrice ? currentPrice * position.quantity : 0;
       const pnl = evalAmount ? evalAmount - position.costBasis : 0;
       return `
         <article class="position-card" data-ticker="${escapeHtml(position.ticker)}">
           <div class="position-head">
-            <strong>${escapeHtml(position.name)} <small>${escapeHtml(position.ticker)}</small></strong>
+            <strong>${escapeHtml(displayName)} <small>${escapeHtml(position.ticker)}</small></strong>
         <button class="ghost-button" type="button" onclick="openAnalysis('${escapeJs(position.ticker)}')">분석</button>
           </div>
           <div class="metric-grid">
@@ -527,7 +532,7 @@ async function screenKospi() {
     state.screening = {
       updatedAt: payload.updatedAt || new Date().toISOString(),
       averageScore: payload.averageScore,
-      items: payload.items || []
+      items: (payload.items || []).map(normalizeCandidate)
     };
     saveLocalState();
     setStatus("코스피 점수를 갱신했습니다.");
@@ -548,7 +553,9 @@ function renderCandidates() {
     els.candidateList.innerHTML = `<div class="empty">점수 갱신을 실행하세요.</div>`;
     return;
   }
-  els.candidateList.innerHTML = items.slice(0, 200).map((item, index) => `
+  els.candidateList.innerHTML = items.slice(0, 200).map((rawItem, index) => {
+    const item = normalizeCandidate(rawItem);
+    return `
     <article class="candidate-card">
       <div class="card-head">
         <strong>${index + 1}. ${escapeHtml(item.name)} <small>${escapeHtml(item.ticker)}</small></strong>
@@ -561,7 +568,8 @@ function renderCandidates() {
       </div>
       <button class="ghost-button" type="button" onclick="openAnalysis('${escapeJs(item.ticker)}')">종목 분석</button>
     </article>
-  `).join("");
+  `;
+  }).join("");
 }
 
 function gradeLabel(score) {
@@ -599,17 +607,74 @@ function prefillTransactionFromActive() {
 
 function rememberStock(analysis) {
   if (!analysis?.ticker) return;
-  state.watchlist = state.watchlist.map((row) => (row.ticker === analysis.ticker ? { ...row, name: analysis.name || row.name } : row));
+  const normalized = normalizeAnalysis(analysis);
+  state.watchlist = state.watchlist.map((row) => (row.ticker === normalized.ticker ? { ...row, name: normalized.name || row.name } : row));
 }
 
 function findRememberedStock(query) {
   const normalized = normalizeText(query);
   const ticker = normalizeTicker(query);
+  const local = ticker ? findStockByTicker(ticker) : stockUniverse.find((row) => normalizeText(row.name || "") === normalized || normalizeText(row.name || "").includes(normalized));
+  if (local) return local;
   const rows = [
     ...Object.values(state.analyses || {}).map((analysis) => ({ ticker: analysis.ticker, name: analysis.name })),
     ...state.watchlist
   ];
   return rows.find((row) => row.ticker === ticker || normalizeText(row.name || "") === normalized || normalizeText(row.name || "").includes(normalized));
+}
+
+function normalizeAnalysis(analysis) {
+  if (!analysis) return analysis;
+  const ticker = normalizeTicker(analysis.ticker || "");
+  const name = displayStockName(ticker, analysis.name);
+  return { ...analysis, ticker: ticker || analysis.ticker, name };
+}
+
+function normalizeCandidate(item) {
+  if (!item) return item;
+  const ticker = normalizeTicker(item.ticker || "");
+  return { ...item, ticker: ticker || item.ticker, name: displayStockName(ticker, item.name) };
+}
+
+function repairStateStockNames() {
+  Object.keys(state.analyses || {}).forEach((ticker) => {
+    state.analyses[ticker] = normalizeAnalysis(state.analyses[ticker]);
+  });
+  state.watchlist = state.watchlist.map((row) => normalizeCandidate(row));
+  if (state.screening && Array.isArray(state.screening.items)) {
+    state.screening.items = state.screening.items.map(normalizeCandidate);
+  }
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+function findStockByTicker(ticker) {
+  const normalized = normalizeTicker(ticker);
+  if (!normalized) return null;
+  return stockUniverse.find((row) => row.ticker === normalized) || null;
+}
+
+function displayStockName(ticker, fallback) {
+  const local = findStockByTicker(ticker);
+  if (local?.name) return local.name;
+  const clean = cleanStockName(fallback);
+  return clean || ticker || "";
+}
+
+function cleanStockName(value) {
+  const text = String(value || "").trim();
+  if (!text || isBrokenText(text)) return "";
+  return text;
+}
+
+function isBrokenText(value) {
+  const text = String(value || "");
+  return text.includes("\uFFFD");
+}
+
+function formatStockLabel(stock) {
+  const ticker = normalizeTicker(stock?.ticker || "");
+  const name = displayStockName(ticker, stock?.name);
+  return `${ticker} ${name}`.trim();
 }
 
 async function refreshLiveData({ quiet = false } = {}) {
@@ -660,6 +725,7 @@ async function pullSync({ quiet = false, onlyIfRemoteNewer = false } = {}) {
     const remote = normalizeState(payload.state || defaultState);
     if (!onlyIfRemoteNewer || String(remote.updatedAt || "") > String(state.updatedAt || "")) {
       state = remote;
+      repairStateStockNames();
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       renderAll();
     }

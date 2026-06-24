@@ -99,16 +99,18 @@ function analyzeStock_(query, seedMoney) {
   const ticker = resolved.ticker;
   const prices = fetchDailyPrices_(ticker, 260);
   const quote = fetchQuote_(ticker);
-  const fundamental = fetchFundamental_(ticker);
+  let fundamental = fetchFundamental_(ticker);
   const currentPrice = quote.currentPrice || last_(prices).close;
+  fundamental = mergeCurrentFundamentals_(ticker, currentPrice, fundamental);
   const indicators = calculateIndicators_(prices);
   const fairValue = calculateFairValue_(currentPrice, indicators, fundamental);
   const finalScore = calculateFinalScore_(currentPrice, fairValue, indicators, fundamental, prices);
   const atr = indicators.atr14 || 0;
   const stopLoss = calculateStopLoss_(currentPrice, atr);
   const upside = currentPrice > 0 ? fairValue / currentPrice - 1 : 0;
-  const signal = finalScore >= 80 && upside >= 0.12 ? "green" : finalScore < 55 || upside < -0.15 ? "red" : "yellow";
-  const recommendation = recommendationLabel_(signal, finalScore);
+  const signalDetail = generateBuySignal_(ticker, currentPrice, finalScore, indicators, fairValue, stopLoss);
+  const signal = signalTone_(signalDetail, finalScore, upside);
+  const recommendation = recommendationLabel_(signalDetail, finalScore);
   const buyPlan = buildBuyPlan_(currentPrice, fairValue, indicators, seedMoney);
 
   return {
@@ -122,6 +124,7 @@ function analyzeStock_(query, seedMoney) {
     fairValue,
     finalScore,
     signal,
+    signalDetail,
     recommendation,
     stopLoss,
     upside,
@@ -177,7 +180,7 @@ function searchStocks_(query, limit) {
 function fetchQuote_(query) {
   const ticker = normalizeTicker_(query);
   const url = "https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:" + encodeURIComponent(ticker);
-  const text = fetchText_(url);
+  const text = fetchText_(url, "EUC-KR");
   const payload = JSON.parse(text);
   const areas = (((payload || {}).result || {}).areas || []);
   const datas = areas.length ? areas[0].datas || [] : [];
@@ -218,17 +221,18 @@ function fetchDailyPrices_(ticker, count) {
 
 function fetchFundamental_(ticker) {
   ticker = normalizeTicker_(ticker);
-  const text = fetchText_("https://finance.naver.com/item/main.naver?code=" + ticker, "EUC-KR");
+  const text = fetchText_("https://finance.naver.com/item/main.naver?code=" + ticker, "UTF-8");
   return {
     eps: latestMetric_(text, "EPS"),
     bps: latestMetric_(text, "BPS"),
     per: latestMetric_(text, "PER"),
-    pbr: latestMetric_(text, "PBR")
+    pbr: latestMetric_(text, "PBR"),
+    dividend_yield: dividendYield_(text)
   };
 }
 
 function latestMetric_(text, metric) {
-  const row = new RegExp("<th[^>]*>\\s*(?:<strong>)?\\s*" + metric + "\\b.*?</th>(.*?)</tr>", "i").exec(text);
+  const row = new RegExp("<th[^>]*>\\s*(?:<strong>)?\\s*" + metric + "\\b[\\s\\S]*?</th>([\\s\\S]*?)</tr>", "i").exec(text);
   if (!row) return null;
   const values = [];
   const regex = /<td[^>]*>\s*(?:<em>)?\s*([-+]?\d[\d,]*(?:\.\d+)?)/g;
@@ -238,6 +242,28 @@ function latestMetric_(text, metric) {
     if (value && value > 0) values.push(value);
   }
   return values.length ? values[values.length - 1] : null;
+}
+
+function dividendYield_(text) {
+  const match = new RegExp("\\uBC30\\uB2F9\\uC218\\uC775\\uB960[\\s\\S]*?([-+]?\\d[\\d,]*(?:\\.\\d+)?)\\s*%").exec(text);
+  return match ? toNumber_(match[1]) : null;
+}
+
+function mergeCurrentFundamentals_(ticker, currentPrice, fundamental) {
+  if (!fundamental) return null;
+  const merged = {
+    ticker,
+    eps: fundamental.eps,
+    bps: fundamental.bps,
+    per: fundamental.per,
+    pbr: fundamental.pbr,
+    dividend_yield: fundamental.dividend_yield,
+    source: "Naver Finance"
+  };
+  if (merged.bps && merged.bps > 0 && currentPrice > 0) {
+    merged.pbr = currentPrice / merged.bps;
+  }
+  return merged;
 }
 
 function calculateIndicators_(prices) {
@@ -309,12 +335,13 @@ function calculateFinalScore_(currentPrice, fairValue, indicators, fundamental, 
     safetyScore += 8;
   }
   if (fundamental.bps && fundamental.bps > 0) qualityScore += 5;
+  if (fundamental.dividend_yield && fundamental.dividend_yield > 2) safetyScore += 5;
   const momentumScore = technicalScore_(indicators);
   const averageVolume = avg_(prices.slice(-20).map((row) => row.volume));
   const tradedValue = averageVolume * currentPrice;
   const liquidityScore = tradedValue >= 20000000000 ? 90 : tradedValue >= 5000000000 ? 80 : tradedValue >= 1000000000 ? 70 : tradedValue >= 100000000 ? 60 : 40;
   const finalScore = clamp_(valueScore) * 0.2 + clamp_(qualityScore) * 0.25 + 60 * 0.15 + momentumScore * 0.2 + clamp_(safetyScore) * 0.1 + liquidityScore * 0.1;
-  return Math.round(finalScore * 10) / 10;
+  return Math.round(finalScore * 10000) / 10000;
 }
 
 function technicalScore_(indicators) {
@@ -357,17 +384,59 @@ function calculateStopLoss_(entryPrice, atr14) {
   return Math.round(Math.min(entryPrice - 2 * atr14, entryPrice * 0.92) * 10000) / 10000;
 }
 
-function recommendationLabel_(signal, finalScore) {
-  if (signal === "green") return "\uAC15\uB825 \uB9E4\uC218";
-  if (signal === "red") return "\uB9E4\uC218 \uAE08\uC9C0";
+function generateBuySignal_(ticker, currentPrice, finalScore, indicators, fairValue, stopLoss) {
+  const reasons = [];
+  const blockedReasons = [];
+  if (fairValue && currentPrice <= fairValue) reasons.push("price_within_or_below_buy_zone");
+  const nearMa60 = indicators.ma60 && indicators.ma60 > 0 && Math.abs(currentPrice - indicators.ma60) / indicators.ma60 <= 0.02;
+  if ((indicators.ma20 && currentPrice > indicators.ma20) || nearMa60) reasons.push("price_above_ma20_or_rebound_from_ma60");
+  if (indicators.rsi14 != null && indicators.rsi14 > 40) reasons.push("rsi14_above_40");
+  if (indicators.volumeZscore != null && indicators.volumeZscore > 1.5) reasons.push("volume_zscore_above_1_5");
+  if (indicators.bullish) reasons.push("bullish_divergence_detected");
+  if (finalScore < 70) blockedReasons.push("final_score_below_70");
+  if (stopLoss == null || stopLoss >= currentPrice) blockedReasons.push("stop_loss_unavailable");
+  const conditionsMet = reasons.length;
+  const isValid = conditionsMet >= 3 && !blockedReasons.length;
+  const signalStrength = conditionsMet >= 5 && finalScore >= 80 ? "strong" : conditionsMet >= 3 ? "normal" : "weak";
+  return {
+    ticker,
+    signal_type: isValid ? "Buy" : "No Buy",
+    is_valid: isValid,
+    signal_strength: signalStrength,
+    final_score: finalScore,
+    entry_price: isValid ? currentPrice : null,
+    stop_loss_price: stopLoss,
+    take_profit_price: isValid ? Math.round(currentPrice * 1.18 * 10000) / 10000 : null,
+    trailing_stop_price: indicators.atr14 && indicators.atr14 > 0 ? Math.round((currentPrice - 3 * indicators.atr14) * 10000) / 10000 : Math.round(currentPrice * 0.92 * 10000) / 10000,
+    conditions_met: conditionsMet,
+    reasons,
+    blocked_reasons: blockedReasons
+  };
+}
+
+function signalTone_(signalDetail, finalScore, upside) {
+  if (signalDetail && signalDetail.is_valid) return "green";
+  const hardBlocks = (signalDetail && signalDetail.blocked_reasons || []).filter((reason) => reason !== "final_score_below_70");
+  if (hardBlocks.length || finalScore < 55 || upside < -0.15) return "red";
+  return "yellow";
+}
+
+function recommendationLabel_(signalDetail, finalScore) {
+  if (signalDetail && signalDetail.is_valid) {
+    if (signalDetail.signal_strength === "strong") return "\uAC15\uB825 \uB9E4\uC218";
+    return "\uB9E4\uC218 \uAC80\uD1A0";
+  }
+  const hardBlocks = (signalDetail && signalDetail.blocked_reasons || []).filter((reason) => reason !== "final_score_below_70");
+  if (hardBlocks.length) return "\uB9E4\uC218 \uCC28\uB2E8";
   if (finalScore >= 70) return "\uAD00\uC2EC \uD6C4\uBCF4";
-  return "\uAD00\uCC30";
+  if (finalScore >= 60) return "\uAD00\uCC30";
+  return "\uC81C\uC678";
 }
 
 function buildBuyPlan_(currentPrice, fairValue, indicators, seedMoney) {
-  const base = Math.min(currentPrice, fairValue * 0.9, indicators.ma20 || currentPrice);
-  const second = Math.min(base * 0.96, indicators.ma60 || base * 0.96);
-  const third = Math.min(base * 0.92, indicators.ma120 || base * 0.92);
+  const base = Math.min(fairValue, indicators.ma20 && indicators.ma20 > 0 ? indicators.ma20 : fairValue);
+  const second = Math.min(fairValue * 0.90, indicators.ma60 && indicators.ma60 > 0 ? indicators.ma60 : fairValue * 0.90);
+  const third = Math.min(fairValue * 0.80, indicators.ma120 && indicators.ma120 > 0 ? indicators.ma120 : fairValue * 0.80);
   return [
     { label: "1차", price: Math.round(base), ratio: 40, amount: Math.round(seedMoney * 0.4) },
     { label: "2차", price: Math.round(second), ratio: 30, amount: Math.round(seedMoney * 0.3) },

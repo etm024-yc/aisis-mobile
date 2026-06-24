@@ -1,4 +1,4 @@
-const CACHE_NAME = "aisis-mobile-v2-search";
+const CACHE_NAME = "aisis-mobile-v3-parity";
 const ASSETS = ["./", "./index.html", "./styles.css", "./app.js", "./kospi_stocks.json", "./manifest.webmanifest", "./app-icon.svg"];
 
 self.addEventListener("install", (event) => {
