@@ -1,4 +1,4 @@
-const CACHE_NAME = "aisis-mobile-v5-watch";
+const CACHE_NAME = "aisis-mobile-v6-candidate-dialog";
 const ASSETS = ["./", "./index.html", "./styles.css", "./app.js", "./kospi_stocks.json", "./manifest.webmanifest", "./app-icon.svg"];
 
 self.addEventListener("install", (event) => {

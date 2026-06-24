@@ -149,6 +149,7 @@ function analyzeStock_(query, seedMoney) {
   const currentPrice = quote.currentPrice || last_(prices).close;
   fundamental = mergeCurrentFundamentals_(ticker, currentPrice, fundamental);
   const indicators = calculateIndicators_(prices);
+  applyLiveVolumeIndicators_(indicators, prices, quote);
   const fairValue = calculateFairValue_(currentPrice, indicators, fundamental);
   const finalScore = calculateFinalScore_(currentPrice, fairValue, indicators, fundamental, prices);
   const atr = indicators.atr14 || 0;
@@ -238,7 +239,8 @@ function fetchQuote_(query) {
     currentPrice: Number(data.nv || data.closePrice || 0),
     previousClose: nullableNumber_(data.pcv),
     change: nullableNumber_(data.cv),
-    changeRate: nullableNumber_(data.cr)
+    changeRate: nullableNumber_(data.cr),
+    volume: nullableNumber_(data.aq || data.accumulatedTradingVolume || data.volume)
   };
 }
 
@@ -368,6 +370,21 @@ function calculateIndicators_(prices) {
     volumeZscore: zscoreLast_(volumes, 20),
     bullish: bullishDivergence_(closes, rsiSeries, 2, 60)
   };
+}
+
+function applyLiveVolumeIndicators_(indicators, prices, quote) {
+  const recentVolumes = prices.slice(-20).map((row) => row.volume || 0);
+  const averageVolume = avg_(recentVolumes);
+  const liveVolume = Number((quote && quote.volume) || last_(prices).volume || 0);
+  if (!liveVolume || !averageVolume) return;
+  const std = std_(recentVolumes);
+  const liveZscore = std > 0 ? (liveVolume - averageVolume) / std : null;
+  indicators.liveVolume = liveVolume;
+  indicators.liveVolumeRatio = liveVolume / averageVolume;
+  indicators.liveVolumeZscore = liveZscore;
+  if (liveZscore != null && (indicators.volumeZscore == null || liveZscore > indicators.volumeZscore)) {
+    indicators.volumeZscore = liveZscore;
+  }
 }
 
 function calculateFairValue_(currentPrice, indicators, fundamental) {

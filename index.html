@@ -7,7 +7,7 @@
     <meta name="theme-color" content="#0f766e" />
     <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="apple-touch-icon" href="./app-icon.svg" />
-    <link rel="stylesheet" href="./styles.css?v=20260624-watch" />
+    <link rel="stylesheet" href="./styles.css?v=20260624-candidate-dialog" />
   </head>
   <body>
     <div class="app-shell">
@@ -118,6 +118,7 @@
             <label><input class="candidate-filter" type="checkbox" value="strong" checked /> 강력 매수</label>
             <label><input class="candidate-filter" type="checkbox" value="review" checked /> 매수 검토</label>
             <label><input class="candidate-filter" type="checkbox" value="watch" checked /> 관심/관찰</label>
+            <label><input class="candidate-filter" type="checkbox" value="other" checked /> 기타</label>
           </div>
           <div id="candidateList"></div>
         </section>
@@ -163,6 +164,7 @@
           <div class="status-box" id="statusBox">준비됨</div>
         </section>
       </main>
+      <div class="candidate-dialog-root" id="candidateDialog"></div>
 
       <nav class="bottom-nav" aria-label="주요 화면">
         <button class="nav-button active" data-view="analysisView" type="button"><span>⌕</span><b>분석</b></button>
@@ -172,6 +174,6 @@
         <button class="nav-button" data-view="settingsView" type="button"><span>⚙</span><b>설정</b></button>
       </nav>
     </div>
-    <script src="./app.js?v=20260624-watch"></script>
+    <script src="./app.js?v=20260624-candidate-dialog"></script>
   </body>
 </html>

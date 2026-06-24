@@ -25,6 +25,9 @@ let activeAnalysis = null;
 let stockUniverse = [];
 let searchTimer = null;
 let transactionFormOpen = false;
+let candidateDialogTierId = "";
+let candidateDialogSort = "score_desc";
+let candidateDialogFilters = new Set(["strong", "review", "watch", "other"]);
 
 const els = {
   syncBadge: document.querySelector("#syncBadge"),
@@ -55,6 +58,7 @@ const els = {
   candidateFilters: document.querySelectorAll(".candidate-filter"),
   marketSummary: document.querySelector("#marketSummary"),
   candidateList: document.querySelector("#candidateList"),
+  candidateDialog: document.querySelector("#candidateDialog"),
   watchList: document.querySelector("#watchList"),
   settingsForm: document.querySelector("#settingsForm"),
   syncUrl: document.querySelector("#syncUrl"),
@@ -369,6 +373,12 @@ function renderAnalysis(analysis) {
         ${metric("매출 성장", formatPercent(analysis.fundamental?.revenueGrowth))}
         ${metric("영업이익 성장", formatPercent(analysis.fundamental?.operatingIncomeGrowth))}
       </div>
+      <div class="metric-grid">
+        ${metric("실시간 거래량", formatShares(analysis.indicators?.liveVolume))}
+        ${metric("20일 평균 대비", formatRatio(analysis.indicators?.liveVolumeRatio))}
+        ${metric("거래량 Z", formatNumber(analysis.indicators?.volumeZscore))}
+        ${metric("시세 출처", escapeHtml(analysis.source || "Naver"))}
+      </div>
       <div class="plain-summary">
         <strong>쉬운 요약</strong>
         <p>${escapeHtml(plainSummary)}</p>
@@ -676,8 +686,6 @@ async function refreshCandidateTiers({ quiet = false } = {}) {
 function renderCandidates() {
   const screening = state.screening || defaultState.screening;
   const tierRows = screening.tierRows || {};
-  const activeItems = screening.items || [];
-  const displayOrder = ["top_20_realtime", "top_50_5min", "top_200_hourly", "full_nightly"];
   const tiers = Array.isArray(screening.tiers) ? screening.tiers : [];
   const refreshedTier = tiers.find((tier) => tier.id === screening.refreshedTierId);
   els.marketSummary.innerHTML = `
@@ -690,37 +698,19 @@ function renderCandidates() {
       ${tiers.map(renderTierCard).join("")}
     </div>
   ` : "";
-  const sections = displayOrder
-    .map((tierId) => {
-      const tier = tiers.find((row) => row.id === tierId) || { id: tierId, label: tierLabel(tierId) };
-      const rows = Array.isArray(tierRows[tierId]) ? tierRows[tierId] : [];
-      if (!rows.length) return "";
-      const visibleRows = candidateRowsForDisplay(rows).slice(0, tierId === "top_200_hourly" || tierId === "full_nightly" ? 200 : rows.length);
-      if (!visibleRows.length) return "";
-      return `
-        <section class="tier-section">
-          <div class="tier-list-title">
-            <strong>${escapeHtml(tier.label || tierLabel(tierId))}</strong>
-            <span>${visibleRows.length}개 · ${escapeHtml(tier.modeLabel || "")}</span>
-          </div>
-          ${visibleRows.map((rawItem, index) => renderCandidateCard(normalizeCandidate(rawItem), index)).join("")}
-        </section>
-      `;
-    })
-    .filter(Boolean)
-    .join("");
-  if (!sections && !activeItems.length) {
+  const hasRows = Object.values(tierRows).some((rows) => Array.isArray(rows) && rows.length);
+  if (!hasRows) {
     els.candidateList.innerHTML = `${tierCards}<div class="empty">후보 티어 갱신을 실행하세요. 전체 분석은 20:00~익일 08:00에 실행됩니다.</div>`;
     return;
   }
-  els.candidateList.innerHTML = `${tierCards}${sections}`;
+  els.candidateList.innerHTML = `${tierCards}<div class="empty">각 후보군 카드를 누르면 순위 목록이 팝업으로 열립니다.</div>`;
 }
 
 function renderTierCard(tier) {
   const statusClass = tier.refreshed ? "fresh" : tier.isDue ? "due" : tier.isAllowedNow ? "ready" : "locked";
   const statusText = tier.blockedReason || (tier.refreshed ? "방금 갱신" : tier.isDue ? "갱신 필요" : tier.isAllowedNow ? "대기" : "시간 전");
   return `
-    <article class="tier-card ${statusClass}">
+    <article class="tier-card ${statusClass}" role="button" tabindex="0" onclick="openCandidateTier('${escapeJs(tier.id)}')">
       <div>
         <strong>${escapeHtml(tier.label || "")}</strong>
         <span>${escapeHtml(tier.scope || "")}</span>
@@ -738,6 +728,78 @@ function renderTierCard(tier) {
       </div>
     </article>
   `;
+}
+
+function openCandidateTier(tierId) {
+  candidateDialogTierId = tierId;
+  renderCandidateDialog();
+}
+
+function closeCandidateDialog() {
+  candidateDialogTierId = "";
+  if (els.candidateDialog) els.candidateDialog.innerHTML = "";
+}
+
+function renderCandidateDialog() {
+  if (!els.candidateDialog || !candidateDialogTierId) return;
+  const screening = state.screening || defaultState.screening;
+  const tierRows = screening.tierRows || {};
+  const tiers = Array.isArray(screening.tiers) ? screening.tiers : [];
+  const tier = tiers.find((row) => row.id === candidateDialogTierId) || { id: candidateDialogTierId, label: tierLabel(candidateDialogTierId) };
+  const rows = Array.isArray(tierRows[candidateDialogTierId]) ? tierRows[candidateDialogTierId] : [];
+  const visibleRows = candidateRowsForDisplay(rows, {
+    filters: candidateDialogFilters,
+    sortMode: candidateDialogSort
+  });
+  const list = visibleRows.length
+    ? visibleRows.map((rawItem, index) => renderCandidateCard(normalizeCandidate(rawItem), index)).join("")
+    : `<div class="empty">조건에 맞는 후보가 없습니다. 필터를 넓혀보세요.</div>`;
+  els.candidateDialog.innerHTML = `
+    <div class="dialog-backdrop" onclick="closeCandidateDialog()">
+      <section class="candidate-dialog" role="dialog" aria-modal="true" onclick="event.stopPropagation()">
+        <div class="dialog-head">
+          <div>
+            <strong>${escapeHtml(tier.label || tierLabel(candidateDialogTierId))}</strong>
+            <span>${formatNumber(rows.length)}개 후보 · ${escapeHtml(tier.modeLabel || "")}</span>
+          </div>
+          <button class="icon-button" type="button" onclick="closeCandidateDialog()">×</button>
+        </div>
+        <div class="candidate-controls dialog-controls">
+          <select aria-label="후보 정렬" onchange="setCandidateDialogSort(this.value)">
+            <option value="score_desc" ${candidateDialogSort === "score_desc" ? "selected" : ""}>점수 높은 순</option>
+            <option value="ratio_desc" ${candidateDialogSort === "ratio_desc" ? "selected" : ""}>적정가 배율 높은 순</option>
+            <option value="price_asc" ${candidateDialogSort === "price_asc" ? "selected" : ""}>현재가 낮은 순</option>
+            <option value="name_asc" ${candidateDialogSort === "name_asc" ? "selected" : ""}>이름순</option>
+          </select>
+          ${renderDialogFilter("strong", "강력 매수")}
+          ${renderDialogFilter("review", "매수 검토")}
+          ${renderDialogFilter("watch", "관심/관찰")}
+          ${renderDialogFilter("other", "기타")}
+        </div>
+        <div class="dialog-list">${list}</div>
+      </section>
+    </div>
+  `;
+}
+
+function renderDialogFilter(value, label) {
+  return `
+    <label>
+      <input type="checkbox" value="${value}" ${candidateDialogFilters.has(value) ? "checked" : ""} onchange="toggleCandidateDialogFilter('${value}', this.checked)" />
+      ${label}
+    </label>
+  `;
+}
+
+function setCandidateDialogSort(value) {
+  candidateDialogSort = value;
+  renderCandidateDialog();
+}
+
+function toggleCandidateDialogFilter(value, checked) {
+  if (checked) candidateDialogFilters.add(value);
+  else candidateDialogFilters.delete(value);
+  renderCandidateDialog();
 }
 
 function renderCandidateCard(item, index) {
@@ -767,12 +829,12 @@ function renderCandidateCard(item, index) {
   `;
 }
 
-function candidateRowsForDisplay(rows) {
-  const filters = selectedCandidateFilters();
+function candidateRowsForDisplay(rows, options = {}) {
+  const filters = options.filters || selectedCandidateFilters();
   return [...rows]
     .map(normalizeCandidate)
     .filter((row) => filters.has(candidateGroup(row)))
-    .sort(candidateSortComparator());
+    .sort(candidateSortComparator(options.sortMode));
 }
 
 function selectedCandidateFilters() {
@@ -792,8 +854,8 @@ function candidateGroup(row) {
   return "other";
 }
 
-function candidateSortComparator() {
-  const mode = els.candidateSort?.value || "score_desc";
+function candidateSortComparator(sortMode) {
+  const mode = sortMode || els.candidateSort?.value || "score_desc";
   return (a, b) => {
     if (mode === "ratio_desc") return fairValueRatio(b) - fairValueRatio(a) || scoreValue(b) - scoreValue(a);
     if (mode === "price_asc") return Number(a.currentPrice || 0) - Number(b.currentPrice || 0);
@@ -830,6 +892,7 @@ function gradeLabel(score) {
 }
 
 function openAnalysis(query) {
+  closeCandidateDialog();
   switchView("analysisView");
   els.stockQuery.value = query;
   analyzeQuery(query);
@@ -1178,6 +1241,12 @@ function formatLargeWon(value) {
   const eok = number / 100000000;
   if (Math.abs(eok) >= 1) return `${Math.round(eok).toLocaleString("ko-KR")}억원`;
   return formatWon(number);
+}
+
+function formatShares(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "-";
+  return `${Math.round(number).toLocaleString("ko-KR")}주`;
 }
 
 function formatNumber(value) {

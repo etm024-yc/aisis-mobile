@@ -473,6 +473,7 @@ select:focus {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
+  cursor: pointer;
 }
 
 .tier-card strong {
@@ -499,6 +500,67 @@ select:focus {
 
 .tier-card.locked {
   background: #f6f7f6;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  align-items: end;
+  background: rgba(17, 24, 39, 0.38);
+}
+
+.candidate-dialog {
+  max-height: min(86vh, 760px);
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  gap: 8px;
+  padding: 14px;
+  border-radius: 14px 14px 0 0;
+  background: #fff;
+  box-shadow: 0 -12px 30px rgba(17, 24, 39, 0.16);
+}
+
+.dialog-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: start;
+}
+
+.dialog-head strong {
+  display: block;
+  font-size: 17px;
+}
+
+.dialog-head span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.icon-button {
+  width: 36px;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 22px;
+  line-height: 1;
+}
+
+.dialog-controls {
+  margin: 0;
+}
+
+.dialog-list {
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+  padding-right: 2px;
 }
 
 .tier-meta,
