@@ -496,6 +496,12 @@ select:focus {
   margin-top: 2px;
 }
 
+.tier-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
 .tier-card strong {
   display: block;
   font-size: 12px;

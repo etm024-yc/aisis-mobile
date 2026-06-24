@@ -169,6 +169,13 @@ function bindEvents() {
   els.candidateFilters.forEach((input) => input.addEventListener("change", renderCandidates));
   if (els.candidateList) {
     els.candidateList.addEventListener("click", (event) => {
+      const refreshButton = event.target.closest("[data-refresh-tier]");
+      if (refreshButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        refreshCandidateTiers({ quiet: false, forceTierId: refreshButton.dataset.refreshTier });
+        return;
+      }
       const button = event.target.closest("[data-candidate-tier]");
       if (!button) return;
       openCandidateTier(button.dataset.candidateTier);
@@ -808,7 +815,7 @@ async function screenMarket() {
   await refreshCandidateTiers({ quiet: false });
 }
 
-async function refreshCandidateTiers({ quiet = false } = {}) {
+async function refreshCandidateTiers({ quiet = false, forceTierId = "" } = {}) {
   if (quiet && !isViewActive("candidatesView")) return;
   const config = getSyncConfig();
   if (!config) {
@@ -817,12 +824,13 @@ async function refreshCandidateTiers({ quiet = false } = {}) {
     return;
   }
   const market = selectedMarket();
-  if (!quiet) setStatus(`${marketLabel(market)} 후보 티어를 확인하고 있습니다.`);
+  if (!quiet) setStatus(forceTierId ? `${marketLabel(market)} ${tierLabel(forceTierId)} 강제 갱신 중입니다.` : `${marketLabel(market)} 후보 티어를 확인하고 있습니다.`);
   try {
     const payload = await jsonp(config.url, {
       action: "screenMarket",
       token: config.token,
       market,
+      forceTier: forceTierId,
       pages: localStorage.getItem(SCREEN_PAGES_KEY) || "80",
       limit: "200",
       seedMoney: localStorage.getItem(SEED_MONEY_KEY) || "0",
@@ -842,7 +850,7 @@ function renderCandidates() {
   const market = selectedMarket();
   const screening = screeningForMarket(market);
   const tierRows = screening.tierRows || {};
-  const tiers = Array.isArray(screening.tiers) ? screening.tiers : [];
+  const tiers = Array.isArray(screening.tiers) && screening.tiers.length ? screening.tiers : defaultScreeningTiers(market);
   const refreshedTier = tiers.find((tier) => tier.id === screening.refreshedTierId);
   els.marketSummary.innerHTML = `
     <div><strong>${marketLabel(market)} 전체 평균</strong> ${screening.averageScore == null ? "-" : formatScore(screening.averageScore) + "점"}</div>
@@ -882,7 +890,10 @@ function renderTierCard(tier) {
         <small>마지막 ${tier.lastRunAt ? formatDateTime(tier.lastRunAt) : "-"}</small>
         <small>다음 ${tier.nextDueAt ? formatDateTime(tier.nextDueAt) : "-"}</small>
       </div>
-      <button class="ghost-button compact candidate-open-button" type="button">목록 보기</button>
+      <div class="tier-actions">
+        <button class="ghost-button compact candidate-open-button" type="button">목록 보기</button>
+        <button class="ghost-button compact" type="button" data-refresh-tier="${escapeHtml(tier.id || "")}">강제 갱신</button>
+      </div>
     </article>
   `;
 }
@@ -1039,6 +1050,16 @@ function tierLabel(tierId) {
   if (tierId === "top_50_5min") return "점수 상위 50개";
   if (tierId === "top_20_realtime") return "점수 상위 20개";
   return tierId;
+}
+
+function defaultScreeningTiers(market = selectedMarket()) {
+  const label = marketLabel(market);
+  return [
+    { id: "full_nightly", label: `${label} 전체 분석`, scope: `${label} BASE 전체`, intervalLabel: "1일", modeLabel: "전체 점수", rowCount: 0, blockedReason: "강제 갱신 가능" },
+    { id: "top_200_hourly", label: "점수 상위 200개", scope: "전체 분석 점수 상위 200개", intervalLabel: "1시간", modeLabel: "심층 분석", rowCount: 0, blockedReason: "강제 갱신 가능" },
+    { id: "top_50_5min", label: "점수 상위 50개", scope: "200개 분석 결과 중 점수 상위 50개", intervalLabel: "5분", modeLabel: "집중 분석", rowCount: 0, blockedReason: "강제 갱신 가능" },
+    { id: "top_20_realtime", label: "점수 상위 20개", scope: "50개 분석 결과 중 점수 상위 20개", intervalLabel: "30초", modeLabel: "초단위 가격 모니터링", rowCount: 0, blockedReason: "강제 갱신 가능" }
+  ];
 }
 
 function gradeLabel(score) {

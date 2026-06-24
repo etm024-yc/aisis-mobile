@@ -1,4 +1,4 @@
-const SYNC_TOKEN = "CHANGE_ME_TO_A_LONG_RANDOM_SECRET";
+const SYNC_TOKEN = "dudcjf11!!";
 const FOLDER_ID = "";
 const FILE_NAME = "aisis-mobile-state.json";
 const SCREENING_FILE_NAME = "aisis-mobile-screening-cache.json";
@@ -151,7 +151,7 @@ function doGet(e) {
     if (action === "quote") return output_({ ok: true, quote: fetchQuoteByMarket_(params.ticker || params.query, market) }, callback);
     if (action === "searchStocks") return output_({ ok: true, items: searchStocksByMarket_(params.query, Number(params.limit || 20), market) }, callback);
     if (action === "analyze") return output_({ ok: true, analysis: analyzeStock_(params.query || params.ticker, Number(params.seedMoney || 0), market) }, callback);
-    if (action === "screenKospi" || action === "screenMarket") return output_(screenMarket_(market, Number(params.pages || 80), Number(params.limit || 200), Number(params.seedMoney || 0), params.priorityTickers || ""), callback);
+    if (action === "screenKospi" || action === "screenMarket") return output_(screenMarket_(market, Number(params.pages || 80), Number(params.limit || 200), Number(params.seedMoney || 0), params.priorityTickers || "", params.forceTier || ""), callback);
     return output_({ ok: false, error: "unknown action" }, callback);
   } catch (error) {
     return output_({ ok: false, error: error.message }, callback);
@@ -318,12 +318,12 @@ function searchStocksByMarket_(query, limit, market) {
 function resolveNasdaqStock_(query) {
   const raw = String(query || "").trim();
   const firstToken = normalizeNasdaqSymbol_(raw.split(/\s+/)[0]);
-  const baseBySymbol = findNasdaqBaseBySymbol_(firstToken);
-  if (baseBySymbol) return Object.assign({}, baseBySymbol, { market: "NASDAQ" });
+  if (firstToken && /^[A-Z][A-Z0-9.\-]{0,7}$/.test(firstToken)) {
+    const staticMatch = NASDAQ_BASE_STOCKS.find((stock) => normalizeNasdaqSymbol_(stock.ticker) === firstToken);
+    return { ticker: firstToken, name: staticMatch ? staticMatch.name : "", market: "NASDAQ" };
+  }
   const baseByName = searchNasdaqBaseStocks_(raw, 1)[0];
   if (baseByName) return baseByName;
-  const symbol = normalizeNasdaqSymbol_(query);
-  if (symbol && raw.toUpperCase() === symbol && symbol.length <= 6 && /^[A-Z][A-Z0-9.\-]{0,5}$/.test(symbol)) return { ticker: symbol, name: "", market: "NASDAQ" };
   const found = searchNasdaqStocks_(query, 1)[0];
   if (!found) throw new Error("나스닥 종목을 찾지 못했습니다. 예: AAPL, MSFT, NVDA");
   return found;
@@ -366,7 +366,7 @@ function searchNasdaqBaseStocks_(query, limit) {
   const raw = String(query || "").trim();
   const normalized = normalizeText_(raw);
   const symbol = normalizeNasdaqSymbol_(raw);
-  const rows = NASDAQ_BASE_STOCKS.map((stock) => {
+  const rows = getNasdaqBaseStocks_().map((stock) => {
     const ticker = normalizeNasdaqSymbol_(stock.ticker);
     const nameText = normalizeText_(stock.name);
     let score = 0;
@@ -385,8 +385,61 @@ function searchNasdaqBaseStocks_(query, limit) {
 function findNasdaqBaseBySymbol_(symbol) {
   symbol = normalizeNasdaqSymbol_(symbol);
   if (!symbol) return null;
-  const found = NASDAQ_BASE_STOCKS.find((stock) => normalizeNasdaqSymbol_(stock.ticker) === symbol);
+  const staticMatch = NASDAQ_BASE_STOCKS.find((stock) => normalizeNasdaqSymbol_(stock.ticker) === symbol);
+  if (staticMatch) return { ticker: normalizeNasdaqSymbol_(staticMatch.ticker), name: staticMatch.name };
+  const found = getNasdaqBaseStocks_().find((stock) => normalizeNasdaqSymbol_(stock.ticker) === symbol);
   return found ? { ticker: normalizeNasdaqSymbol_(found.ticker), name: found.name } : null;
+}
+
+function getNasdaqBaseStocks_() {
+  try {
+    const text = fetchText_("https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt", "UTF-8");
+    const parsed = parseNasdaqListedText_(text);
+    if (parsed.length) return parsed;
+  } catch (error) {
+    // Keep the app usable when Nasdaq Trader is temporarily unavailable.
+  }
+  return NASDAQ_BASE_STOCKS.map((stock) => ({
+    ticker: normalizeNasdaqSymbol_(stock.ticker),
+    name: stock.name,
+    market: "NASDAQ"
+  }));
+}
+
+function parseNasdaqListedText_(text) {
+  const rows = [];
+  String(text || "").split(/\r?\n/).forEach((line) => {
+    const parts = String(line || "").trim().split("|");
+    if (parts.length < 8 || parts[0] === "Symbol" || parts[0].indexOf("File Creation Time") === 0) return;
+    const ticker = normalizeNasdaqSymbol_(parts[0]);
+    const name = cleanNasdaqSecurityName_(parts[1]);
+    const testIssue = String(parts[3] || "").toUpperCase();
+    const etf = String(parts[6] || "").toUpperCase();
+    const nextShares = String(parts[7] || "").toUpperCase();
+    if (!ticker || !name) return;
+    if (testIssue === "Y" || etf === "Y" || nextShares === "Y") return;
+    if (!isCompanyLikeNasdaqSecurity_(ticker, name)) return;
+    rows.push({ ticker, name, market: "NASDAQ" });
+  });
+  return rows;
+}
+
+function cleanNasdaqSecurityName_(name) {
+  return String(name || "")
+    .replace(/\s+-\s+Common Stock$/i, "")
+    .replace(/\s+-\s+Class [A-Z] Common Stock$/i, "")
+    .replace(/\s+-\s+Ordinary Shares?$/i, "")
+    .replace(/\s+-\s+American Depositary Shares?.*$/i, " - ADR")
+    .trim();
+}
+
+function isCompanyLikeNasdaqSecurity_(ticker, name) {
+  const upperName = String(name || "").toUpperCase();
+  if (ticker.indexOf("^") >= 0 || ticker.indexOf("$") >= 0) return false;
+  if (/W$/.test(ticker) && upperName.indexOf("WARRANT") >= 0) return false;
+  if (/U$/.test(ticker) && upperName.indexOf("UNIT") >= 0) return false;
+  if (/R$/.test(ticker) && upperName.indexOf("RIGHT") >= 0) return false;
+  return !/(WARRANT|RIGHT|UNIT|PREFERRED|DEPOSITARY SHARES|NOTE DUE|BOND|ETF|ETN|FUND|TRUST|INDEX)/.test(upperName);
 }
 
 function fetchNasdaqQuote_(query) {
@@ -466,8 +519,9 @@ function fetchNasdaqChart_(ticker, range, interval) {
 }
 
 function fetchNasdaqFundamental_(ticker, quote) {
-  return {
-    ticker: normalizeNasdaqSymbol_(ticker),
+  ticker = normalizeNasdaqSymbol_(ticker);
+  const fallback = {
+    ticker,
     eps: null,
     bps: null,
     per: null,
@@ -480,6 +534,46 @@ function fetchNasdaqFundamental_(ticker, quote) {
     source: "Yahoo Finance chart",
     note: "나스닥 모바일 분석은 현재 가격, 거래량, 이동평균, RSI 중심으로 계산합니다."
   };
+  try {
+    const summary = fetchYahooQuoteSummary_(ticker, "defaultKeyStatistics,financialData,summaryDetail,price");
+    const stats = summary.defaultKeyStatistics || {};
+    const financial = summary.financialData || {};
+    const detail = summary.summaryDetail || {};
+    const eps = yahooNumber_(stats.trailingEps) || yahooNumber_(stats.forwardEps);
+    const bps = yahooNumber_(stats.bookValue);
+    const per = yahooNumber_(detail.trailingPE) || yahooNumber_(detail.forwardPE) || yahooNumber_(stats.trailingPE) || yahooNumber_(stats.forwardPE);
+    const pbr = yahooNumber_(stats.priceToBook);
+    const dividendYield = yahooNumber_(detail.dividendYield);
+    return {
+      ticker,
+      eps,
+      bps,
+      per,
+      pbr,
+      dividend_yield: dividendYield == null ? null : dividendYield * 100,
+      revenue: yahooNumber_(financial.totalRevenue),
+      operatingIncome: null,
+      revenueGrowth: yahooNumber_(financial.revenueGrowth),
+      operatingIncomeGrowth: yahooNumber_(financial.earningsGrowth),
+      source: "Yahoo Finance quoteSummary",
+      note: pbr == null ? "PBR은 Yahoo에서 제공되지 않는 종목이 있어 비어 있을 수 있습니다." : ""
+    };
+  } catch (error) {
+    return fallback;
+  }
+}
+
+function fetchYahooQuoteSummary_(ticker, modules) {
+  const url = "https://query1.finance.yahoo.com/v10/finance/quoteSummary/" + encodeURIComponent(normalizeNasdaqSymbol_(ticker)) + "?modules=" + encodeURIComponent(modules);
+  const payload = JSON.parse(fetchText_(url, "UTF-8"));
+  const result = (((payload || {}).quoteSummary || {}).result || [])[0];
+  if (!result) throw new Error("Yahoo 재무지표를 가져오지 못했습니다.");
+  return result;
+}
+
+function yahooNumber_(value) {
+  if (value && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, "raw")) return nullableNumber_(value.raw);
+  return nullableNumber_(value);
 }
 
 function fetchStooqDailyPrices_(ticker, count) {
@@ -849,7 +943,7 @@ function buildReasons_(finalScore, upside, indicators, fundamental) {
   return reasons;
 }
 
-function screenMarket_(market, pages, limit, seedMoney, priorityTickersText) {
+function screenMarket_(market, pages, limit, seedMoney, priorityTickersText, forceTierId) {
   market = marketCode_(market);
   const maxPages = Math.min(Math.max(Number(pages || 80), 1), 80);
   const maxItems = Math.min(Math.max(Number(limit || 200), 20), 300);
@@ -857,6 +951,20 @@ function screenMarket_(market, pages, limit, seedMoney, priorityTickersText) {
   cache.market = market;
   const now = new Date();
   const priorityTickers = parsePriorityTickers_(priorityTickersText, market);
+  forceTierId = normalizeForceTierId_(forceTierId);
+  if (forceTierId) {
+    const forcedResult = runForcedTier_(forceTierId, cache, maxPages, seedMoney, market);
+    const priorityResult = mergePriorityAnalyses_(cache, priorityTickers, seedMoney, market);
+    const refreshedTierId = forcedResult.ran ? forceTierId : "";
+    const message = forcedResult.ran
+      ? marketTierLabel_(tierById_(forceTierId), market) + "을(를) 강제 갱신했습니다." + (priorityResult.count ? " 관심/보유 " + priorityResult.count + "개도 반영했습니다." : "")
+      : forcedResult.reason || "강제 갱신하지 못했습니다.";
+    if (forcedResult.ran || priorityResult.count) {
+      cache.updatedAt = now.toISOString();
+      saveScreeningCache_(cache, market);
+    }
+    return buildScreeningResponse_(cache, maxItems, now, refreshedTierId, message, market);
+  }
   if (!tierRows_(cache, "full_nightly").length) {
     const result = runScreeningTier_(SCREENING_TIERS[0], cache, maxPages, seedMoney, { bootstrap: true, market });
     if (result.ran) mergePriorityAnalyses_(cache, priorityTickers, seedMoney, market);
@@ -893,6 +1001,25 @@ function screenMarket_(market, pages, limit, seedMoney, priorityTickersText) {
   }
 
   return buildScreeningResponse_(cache, maxItems, now, refreshedTierId, runMessage, market);
+}
+
+function normalizeForceTierId_(tierId) {
+  const value = String(tierId || "").trim();
+  return tierById_(value) ? value : "";
+}
+
+function tierById_(tierId) {
+  return SCREENING_TIERS.find((tier) => tier.id === tierId) || null;
+}
+
+function runForcedTier_(tierId, cache, pages, seedMoney, market) {
+  const tier = tierById_(tierId);
+  if (!tier) return { ran: false, reason: "알 수 없는 티어입니다." };
+  if (tier.sourceTierId && !tierRows_(cache, tier.sourceTierId).length) {
+    const prerequisite = runForcedTier_(tier.sourceTierId, cache, pages, seedMoney, market);
+    if (!prerequisite.ran) return prerequisite;
+  }
+  return runScreeningTier_(tier, cache, pages, seedMoney, { market, force: true });
 }
 
 function parsePriorityTickers_(value, market) {
@@ -1330,6 +1457,9 @@ function scoreMarketRow_(stock) {
     marketCap: stock.marketCap,
     volume: stock.volume,
     per: stock.per,
+    pbr: stock.pbr,
+    eps: stock.eps,
+    bps: stock.bps,
     roe: stock.roe,
     finalScore: rounded,
     recommendation: rounded >= 80 ? "강력 매수 후보" : rounded >= 70 ? "관심 후보" : rounded >= 60 ? "관찰" : "제외"
@@ -1383,8 +1513,9 @@ function fetchMarketSummaryByMarket_(pages, market) {
 }
 
 function fetchNasdaqMarketSummary_(pages) {
-  const maxItems = Math.min(Math.max(Number(pages || 80), 1) * 2, NASDAQ_BASE_STOCKS.length);
-  const baseRows = NASDAQ_BASE_STOCKS.slice(0, maxItems).map((stock) => ({
+  const baseUniverse = getNasdaqBaseStocks_();
+  const maxItems = Math.min(Math.max(Number(pages || 80), 1) * 50, baseUniverse.length);
+  const baseRows = baseUniverse.slice(0, maxItems).map((stock) => ({
     ticker: normalizeNasdaqSymbol_(stock.ticker),
     name: stock.name,
     market: "NASDAQ"
@@ -1392,8 +1523,8 @@ function fetchNasdaqMarketSummary_(pages) {
   const byTicker = {};
   baseRows.forEach((row) => { byTicker[row.ticker] = row; });
   const symbols = baseRows.map((row) => row.ticker);
-  for (let index = 0; index < symbols.length; index += 40) {
-    const chunk = symbols.slice(index, index + 40);
+  for (let index = 0; index < symbols.length; index += 200) {
+    const chunk = symbols.slice(index, index + 200);
     try {
       const url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=" + encodeURIComponent(chunk.join(","));
       const payload = JSON.parse(fetchText_(url, "UTF-8"));
@@ -1407,6 +1538,9 @@ function fetchNasdaqMarketSummary_(pages) {
           volume: nullableNumber_(quote.regularMarketVolume),
           marketCap: nullableNumber_(quote.marketCap),
           per: nullableNumber_(quote.trailingPE || quote.forwardPE),
+          pbr: nullableNumber_(quote.priceToBook),
+          eps: nullableNumber_(quote.epsTrailingTwelveMonths || quote.epsForward),
+          bps: nullableNumber_(quote.bookValue),
           ma50: nullableNumber_(quote.fiftyDayAverage),
           ma200: nullableNumber_(quote.twoHundredDayAverage),
           changeRate: nullableNumber_(quote.regularMarketChangePercent)
