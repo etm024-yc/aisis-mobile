@@ -1,6 +1,7 @@
 const SYNC_TOKEN = "CHANGE_ME_TO_A_LONG_RANDOM_SECRET";
 const FOLDER_ID = "";
 const FILE_NAME = "aisis-mobile-state.json";
+const SCREENING_FILE_NAME = "aisis-mobile-screening-cache.json";
 const FAIR_VALUE_WEIGHTS = {
   dcf_value: 0.30,
   per_value: 0.25,
@@ -9,6 +10,49 @@ const FAIR_VALUE_WEIGHTS = {
   ev_ebitda_value: 0.10,
   technical_value: 0.10
 };
+const SCREENING_TIERS = [
+  {
+    id: "full_nightly",
+    label: "\uCF54\uC2A4\uD53C \uC804\uCCB4 \uBD84\uC11D",
+    scope: "\uCF54\uC2A4\uD53C \uC804\uCCB4",
+    limit: null,
+    intervalMs: 24 * 60 * 60 * 1000,
+    mode: "summary",
+    modeLabel: "\uC804\uCCB4 \uC810\uC218",
+    windowStartHour: 20,
+    windowEndHour: 8
+  },
+  {
+    id: "top_200_hourly",
+    label: "\uC810\uC218 \uC0C1\uC704 200\uAC1C",
+    scope: "\uC804\uCCB4 \uBD84\uC11D \uC810\uC218 \uC0C1\uC704 200\uAC1C",
+    limit: 200,
+    intervalMs: 60 * 60 * 1000,
+    mode: "deep",
+    modeLabel: "\uC2EC\uCE35 \uBD84\uC11D",
+    sourceTierId: "full_nightly"
+  },
+  {
+    id: "top_50_5min",
+    label: "\uC810\uC218 \uC0C1\uC704 50\uAC1C",
+    scope: "200\uAC1C \uBD84\uC11D \uACB0\uACFC \uC911 \uC810\uC218 \uC0C1\uC704 50\uAC1C",
+    limit: 50,
+    intervalMs: 5 * 60 * 1000,
+    mode: "deep",
+    modeLabel: "\uC9D1\uC911 \uBD84\uC11D",
+    sourceTierId: "top_200_hourly"
+  },
+  {
+    id: "top_20_realtime",
+    label: "\uC810\uC218 \uC0C1\uC704 20\uAC1C",
+    scope: "50\uAC1C \uBD84\uC11D \uACB0\uACFC \uC911 \uC810\uC218 \uC0C1\uC704 20\uAC1C",
+    limit: 20,
+    intervalMs: 30 * 1000,
+    mode: "light",
+    modeLabel: "\uCD08\uB2E8\uC704 \uAC00\uACA9 \uBAA8\uB2C8\uD130\uB9C1",
+    sourceTierId: "top_50_5min"
+  }
+];
 
 function doGet(e) {
   const params = e.parameter || {};
@@ -23,7 +67,7 @@ function doGet(e) {
     if (action === "quote") return output_({ ok: true, quote: fetchQuote_(params.ticker || params.query) }, callback);
     if (action === "searchStocks") return output_({ ok: true, items: searchStocks_(params.query, Number(params.limit || 20)) }, callback);
     if (action === "analyze") return output_({ ok: true, analysis: analyzeStock_(params.query || params.ticker, Number(params.seedMoney || 0)) }, callback);
-    if (action === "screenKospi") return output_(screenKospi_(Number(params.pages || 80), Number(params.limit || 200)), callback);
+    if (action === "screenKospi") return output_(screenKospi_(Number(params.pages || 80), Number(params.limit || 200), Number(params.seedMoney || 0)), callback);
     return output_({ ok: false, error: "unknown action" }, callback);
   } catch (error) {
     return output_({ ok: false, error: error.message }, callback);
@@ -454,18 +498,275 @@ function buildReasons_(finalScore, upside, indicators, fundamental) {
   return reasons;
 }
 
-function screenKospi_(pages, limit) {
+function screenKospi_(pages, limit, seedMoney) {
   const maxPages = Math.min(Math.max(Number(pages || 80), 1), 80);
   const maxItems = Math.min(Math.max(Number(limit || 200), 20), 300);
-  const stocks = fetchMarketSummary_(maxPages);
-  const scored = stocks.map(scoreMarketRow_).sort((a, b) => b.finalScore - a.finalScore);
-  const averageScore = scored.length ? avg_(scored.map((row) => row.finalScore)) : null;
+  const cache = normalizeScreeningCache_(loadScreeningCache_());
+  const now = new Date();
+  const dueTier = firstDueTier_(cache, now);
+  let refreshedTierId = "";
+  let runMessage = "\uC2E4\uD589 \uC8FC\uAE30\uAC00 \uC544\uC9C1 \uC544\uB2D9\uB2C8\uB2E4. \uCE90\uC2DC\uB41C \uD6C4\uBCF4\uB97C \uD45C\uC2DC\uD569\uB2C8\uB2E4.";
+
+  if (dueTier) {
+    const result = runScreeningTier_(dueTier, cache, maxPages, seedMoney);
+    if (result.ran) {
+      refreshedTierId = dueTier.id;
+      runMessage = dueTier.label + "\uC744(\uB97C) \uAC31\uC2E0\uD588\uC2B5\uB2C8\uB2E4.";
+      cache.updatedAt = now.toISOString();
+      saveScreeningCache_(cache);
+    } else {
+      runMessage = result.reason || "\uC120\uD589 \uBD84\uC11D \uACB0\uACFC\uAC00 \uC5C6\uC5B4 \uC2E4\uD589\uD558\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.";
+    }
+  }
+
+  return buildScreeningResponse_(cache, maxItems, now, refreshedTierId, runMessage);
+}
+
+function runScreeningTier_(tier, cache, pages, seedMoney) {
+  if (tier.id === "full_nightly") {
+    const stocks = fetchMarketSummary_(pages);
+    const rows = stocks.map(scoreMarketRow_).sort(compareScoreRows_);
+    cache.tiers[tier.id] = {
+      lastRunAt: new Date().toISOString(),
+      rows,
+      metadata: {
+        selectionBasis: "full_universe",
+        rowCount: rows.length,
+        mode: tier.mode
+      }
+    };
+    return { ran: true };
+  }
+
+  const sourceTier = cache.tiers[tier.sourceTierId] || {};
+  const sourceRows = Array.isArray(sourceTier.rows) ? sourceTier.rows.slice().sort(compareScoreRows_) : [];
+  if (!sourceRows.length) {
+    return { ran: false, reason: tier.label + "\uC740(\uB294) \uC120\uD589 \uD2F0\uC5B4 \uACB0\uACFC\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4." };
+  }
+
+  const selected = sourceRows.slice(0, tier.limit || sourceRows.length);
+  const rows = tier.mode === "light"
+    ? refreshLightRows_(selected)
+    : analyzeTierRows_(selected, seedMoney).sort(compareScoreRows_);
+  cache.tiers[tier.id] = {
+    lastRunAt: new Date().toISOString(),
+    rows,
+    metadata: {
+      selectionBasis: "score_rank",
+      sourceTierId: tier.sourceTierId,
+      sourceRowCount: sourceRows.length,
+      rowCount: rows.length,
+      mode: tier.mode
+    }
+  };
+  return { ran: true };
+}
+
+function analyzeTierRows_(sourceRows, seedMoney) {
+  return sourceRows.map((row) => {
+    try {
+      return analysisToScreenerRow_(analyzeStock_(row.ticker, seedMoney), row);
+    } catch (error) {
+      return Object.assign({}, row, {
+        recommendation: "\uBD84\uC11D \uC2E4\uD328",
+        reason: error.message || "\uC2EC\uCE35 \uBD84\uC11D \uC2E4\uD328"
+      });
+    }
+  });
+}
+
+function analysisToScreenerRow_(analysis, fallback) {
+  return {
+    ticker: analysis.ticker,
+    name: analysis.name || fallback.name || analysis.ticker,
+    market: analysis.market || fallback.market || "KOSPI",
+    currentPrice: analysis.currentPrice,
+    fairValue: analysis.fairValue,
+    finalScore: analysis.finalScore,
+    recommendation: analysis.recommendation,
+    reason: (analysis.reasons || []).join(", "),
+    stopLoss: analysis.stopLoss,
+    signal: analysis.signal,
+    upside: analysis.upside,
+    per: analysis.fundamental && analysis.fundamental.per,
+    pbr: analysis.fundamental && analysis.fundamental.pbr,
+    sourceTierScore: fallback.finalScore || null,
+    fetchedAt: analysis.fetchedAt
+  };
+}
+
+function refreshLightRows_(sourceRows) {
+  return sourceRows.map((row) => {
+    try {
+      const quote = fetchQuote_(row.ticker);
+      const currentPrice = quote.currentPrice || row.currentPrice;
+      const fairValue = row.fairValue || null;
+      const upside = fairValue && currentPrice ? fairValue / currentPrice - 1 : row.upside;
+      return Object.assign({}, row, {
+        name: quote.name || row.name,
+        currentPrice,
+        previousClose: quote.previousClose || null,
+        change: quote.change || null,
+        changeRate: quote.changeRate || null,
+        upside,
+        fetchedAt: new Date().toISOString(),
+        reason: "\uC0C1\uC704 20\uAC1C \uCD08\uB2E8\uC704 \uAC00\uACA9 \uBAA8\uB2C8\uD130\uB9C1"
+      });
+    } catch (error) {
+      return Object.assign({}, row, {
+        reason: "\uAC00\uACA9 \uBAA8\uB2C8\uD130\uB9C1 \uC2E4\uD328: " + (error.message || error)
+      });
+    }
+  });
+}
+
+function firstDueTier_(cache, now) {
+  for (let index = 0; index < SCREENING_TIERS.length; index += 1) {
+    const tier = SCREENING_TIERS[index];
+    if (tierIsDue_(tier, cache, now)) return tier;
+  }
+  return null;
+}
+
+function tierIsDue_(tier, cache, now) {
+  if (!isTierAllowedNow_(tier, now)) return false;
+  const lastRunAt = tierLastRunAt_(cache, tier.id);
+  if (!lastRunAt) return true;
+  return now.getTime() - lastRunAt.getTime() >= tier.intervalMs;
+}
+
+function isTierAllowedNow_(tier, now) {
+  if (tier.windowStartHour == null || tier.windowEndHour == null) return true;
+  const hour = Number(Utilities.formatDate(now, "Asia/Seoul", "H"));
+  if (tier.windowStartHour <= tier.windowEndHour) {
+    return hour >= tier.windowStartHour && hour < tier.windowEndHour;
+  }
+  return hour >= tier.windowStartHour || hour < tier.windowEndHour;
+}
+
+function tierLastRunAt_(cache, tierId) {
+  const raw = cache.tiers && cache.tiers[tierId] && cache.tiers[tierId].lastRunAt;
+  if (!raw) return null;
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function nextTierDueAt_(tier, cache, now) {
+  const lastRunAt = tierLastRunAt_(cache, tier.id);
+  if (!lastRunAt) return isTierAllowedNow_(tier, now) ? now : nextWindowStart_(tier, now);
+  const candidate = new Date(lastRunAt.getTime() + tier.intervalMs);
+  if (tier.windowStartHour == null) return candidate;
+  return isTierAllowedNow_(tier, candidate) ? candidate : nextWindowStart_(tier, candidate > now ? candidate : now);
+}
+
+function nextWindowStart_(tier, now) {
+  if (tier.windowStartHour == null) return now;
+  const nowKstText = Utilities.formatDate(now, "Asia/Seoul", "yyyy/MM/dd");
+  const todayStart = new Date(nowKstText + " " + twoDigits_(tier.windowStartHour) + ":00:00 GMT+0900");
+  if (todayStart.getTime() >= now.getTime()) return todayStart;
+  return new Date(todayStart.getTime() + 24 * 60 * 60 * 1000);
+}
+
+function buildScreeningResponse_(cache, limit, now, refreshedTierId, message) {
+  const fullRows = tierRows_(cache, "full_nightly");
+  const tierRows = {
+    full_nightly: fullRows.slice(0, Math.min(limit, 200)),
+    top_200_hourly: tierRows_(cache, "top_200_hourly").slice(0, 200),
+    top_50_5min: tierRows_(cache, "top_50_5min").slice(0, 50),
+    top_20_realtime: tierRows_(cache, "top_20_realtime").slice(0, 20)
+  };
+  const activeTierId = ["top_20_realtime", "top_50_5min", "top_200_hourly", "full_nightly"].find((tierId) => tierRows[tierId].length) || "full_nightly";
+  const averageScore = fullRows.length ? avg_(fullRows.map((row) => row.finalScore || 0)) : null;
   return {
     ok: true,
-    updatedAt: new Date().toISOString(),
-    averageScore: averageScore == null ? null : Math.round(averageScore * 10) / 10,
-    items: scored.slice(0, maxItems)
+    updatedAt: cache.updatedAt || "",
+    averageScore: averageScore == null ? null : Math.round(averageScore * 10000) / 10000,
+    refreshedTierId,
+    activeTierId,
+    message,
+    tiers: SCREENING_TIERS.map((tier) => tierStatusPayload_(tier, cache, now, refreshedTierId)),
+    tierRows,
+    items: tierRows[activeTierId].slice(0, limit)
   };
+}
+
+function tierStatusPayload_(tier, cache, now, refreshedTierId) {
+  const tierCache = cache.tiers[tier.id] || {};
+  const rows = Array.isArray(tierCache.rows) ? tierCache.rows : [];
+  const metadata = tierCache.metadata || {};
+  const nextDueAt = nextTierDueAt_(tier, cache, now);
+  return {
+    id: tier.id,
+    label: tier.label,
+    scope: tier.scope,
+    limit: tier.limit,
+    intervalMs: tier.intervalMs,
+    intervalLabel: intervalLabel_(tier.intervalMs),
+    mode: tier.mode,
+    modeLabel: tier.modeLabel,
+    sourceTierId: tier.sourceTierId || "",
+    lastRunAt: tierCache.lastRunAt || "",
+    nextDueAt: nextDueAt ? nextDueAt.toISOString() : "",
+    isAllowedNow: isTierAllowedNow_(tier, now),
+    isDue: tierIsDue_(tier, cache, now),
+    rowCount: rows.length,
+    refreshed: tier.id === refreshedTierId,
+    selectionBasis: metadata.selectionBasis || "",
+    sourceRowCount: metadata.sourceRowCount || null
+  };
+}
+
+function tierRows_(cache, tierId) {
+  const tierCache = cache.tiers[tierId] || {};
+  const rows = Array.isArray(tierCache.rows) ? tierCache.rows : [];
+  return rows.slice().sort(compareScoreRows_);
+}
+
+function compareScoreRows_(a, b) {
+  const aScore = Number(a.finalScore == null ? -1 : a.finalScore);
+  const bScore = Number(b.finalScore == null ? -1 : b.finalScore);
+  if (bScore !== aScore) return bScore - aScore;
+  return String(a.name || "").localeCompare(String(b.name || ""), "ko");
+}
+
+function loadScreeningCache_() {
+  const file = getNamedFile_(SCREENING_FILE_NAME);
+  if (!file) return { tiers: {} };
+  const text = file.getBlob().getDataAsString("UTF-8");
+  if (!text) return { tiers: {} };
+  return JSON.parse(text);
+}
+
+function saveScreeningCache_(cache) {
+  const text = JSON.stringify(cache, null, 2);
+  const file = getNamedFile_(SCREENING_FILE_NAME);
+  if (file) {
+    file.setContent(text);
+  } else {
+    getFolder_().createFile(SCREENING_FILE_NAME, text, MimeType.PLAIN_TEXT);
+  }
+}
+
+function normalizeScreeningCache_(cache) {
+  cache = cache && typeof cache === "object" ? cache : {};
+  cache.tiers = cache.tiers && typeof cache.tiers === "object" ? cache.tiers : {};
+  return cache;
+}
+
+function getNamedFile_(fileName) {
+  const files = getFolder_().getFilesByName(fileName);
+  return files.hasNext() ? files.next() : null;
+}
+
+function intervalLabel_(intervalMs) {
+  if (intervalMs >= 24 * 60 * 60 * 1000) return Math.round(intervalMs / (24 * 60 * 60 * 1000)) + "\uC77C";
+  if (intervalMs >= 60 * 60 * 1000) return Math.round(intervalMs / (60 * 60 * 1000)) + "\uC2DC\uAC04";
+  if (intervalMs >= 60 * 1000) return Math.round(intervalMs / (60 * 1000)) + "\uBD84";
+  return Math.round(intervalMs / 1000) + "\uCD08";
+}
+
+function twoDigits_(value) {
+  return String(value).padStart(2, "0");
 }
 
 function scoreMarketRow_(stock) {

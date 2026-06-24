@@ -6,6 +6,7 @@ const SEED_MONEY_KEY = "aisis-mobile-seed-money-v1";
 const SCREEN_PAGES_KEY = "aisis-mobile-screen-pages-v1";
 const SYNC_DEBOUNCE_MS = 1200;
 const POLL_INTERVAL_MS = 60 * 1000;
+const CANDIDATE_POLL_INTERVAL_MS = 30 * 1000;
 const SEARCH_DEBOUNCE_MS = 220;
 
 const defaultState = {
@@ -14,7 +15,7 @@ const defaultState = {
   transactions: [],
   watchlist: [],
   analyses: {},
-  screening: { updatedAt: "", averageScore: null, items: [] }
+  screening: { updatedAt: "", averageScore: null, items: [], tiers: [], tierRows: {}, activeTierId: "" }
 };
 
 let state = loadLocalState();
@@ -83,6 +84,7 @@ function init() {
   renderAll();
   syncOnStart();
   setInterval(() => refreshLiveData({ quiet: true }), POLL_INTERVAL_MS);
+  setInterval(() => refreshCandidateTiers({ quiet: true }), CANDIDATE_POLL_INTERVAL_MS);
 }
 
 function bindEvents() {
@@ -115,9 +117,13 @@ function switchView(viewId) {
   els.navButtons.forEach((button) => button.classList.toggle("active", button.dataset.view === viewId));
 }
 
+function isViewActive(viewId) {
+  return Boolean(document.querySelector(`#${viewId}.active`));
+}
+
 async function loadStockUniverse() {
   try {
-    const response = await fetch("./kospi_stocks.json?v=20260624-parity", { cache: "no-store" });
+    const response = await fetch("./kospi_stocks.json?v=20260624-tiers", { cache: "no-store" });
     if (!response.ok) throw new Error("stock universe not found");
     const payload = await response.json();
     stockUniverse = Array.isArray(payload.items) ? payload.items : [];
@@ -238,21 +244,24 @@ function loadLocalState() {
 }
 
 function normalizeState(payload) {
+  const screening = payload.screening && typeof payload.screening === "object"
+    ? normalizeScreeningPayload(payload.screening)
+    : defaultState.screening;
   return {
     ...defaultState,
     ...payload,
     transactions: Array.isArray(payload.transactions) ? payload.transactions : [],
     watchlist: Array.isArray(payload.watchlist) ? payload.watchlist : [],
     analyses: payload.analyses && typeof payload.analyses === "object" ? payload.analyses : {},
-    screening: payload.screening && typeof payload.screening === "object" ? payload.screening : defaultState.screening
+    screening
   };
 }
 
-function saveLocalState({ touch = true } = {}) {
+function saveLocalState({ touch = true, push = true } = {}) {
   if (touch) state.updatedAt = new Date().toISOString();
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   renderAll();
-  queuePush();
+  if (push) queuePush();
 }
 
 function renderAll() {
@@ -514,48 +523,103 @@ async function refreshHoldings() {
 }
 
 async function screenKospi() {
+  await refreshCandidateTiers({ quiet: false });
+}
+
+async function refreshCandidateTiers({ quiet = false } = {}) {
+  if (quiet && !isViewActive("candidatesView")) return;
   const config = getSyncConfig();
   if (!config) {
-    setStatus("설정에서 Apps Script URL과 동기화 비밀번호를 먼저 입력하세요.", "warn");
+    if (!quiet) setStatus("설정에서 Apps Script URL과 동기화 비밀번호를 먼저 입력하세요.", "warn");
     switchView("settingsView");
     return;
   }
-  setStatus("코스피 점수를 갱신하고 있습니다.");
+  if (!quiet) setStatus("후보 티어를 확인하고 있습니다.");
   try {
     const payload = await jsonp(config.url, {
       action: "screenKospi",
       token: config.token,
       pages: localStorage.getItem(SCREEN_PAGES_KEY) || "80",
-      limit: "200"
+      limit: "200",
+      seedMoney: localStorage.getItem(SEED_MONEY_KEY) || "0"
     });
-    if (!payload.ok) throw new Error(payload.error || "점수 갱신 실패");
-    state.screening = {
-      updatedAt: payload.updatedAt || new Date().toISOString(),
-      averageScore: payload.averageScore,
-      items: (payload.items || []).map(normalizeCandidate)
-    };
-    saveLocalState();
-    setStatus("코스피 점수를 갱신했습니다.");
+    if (!payload.ok) throw new Error(payload.error || "후보 갱신 실패");
+    state.screening = normalizeScreeningPayload(payload);
+    saveLocalState({ touch: false, push: false });
+    if (!quiet) setStatus(payload.message || "후보 티어를 확인했습니다.");
   } catch (error) {
-    setStatus(friendlySyncError(error), "error");
+    if (!quiet) setStatus(friendlySyncError(error), "error");
     if (isUnauthorizedError(error)) switchView("settingsView");
   }
 }
 
 function renderCandidates() {
   const screening = state.screening || defaultState.screening;
-  const items = screening.items || [];
+  const tierRows = screening.tierRows || {};
+  const activeItems = screening.items || [];
+  const displayOrder = ["top_20_realtime", "top_50_5min", "top_200_hourly", "full_nightly"];
+  const tiers = Array.isArray(screening.tiers) ? screening.tiers : [];
+  const refreshedTier = tiers.find((tier) => tier.id === screening.refreshedTierId);
   els.marketSummary.innerHTML = `
-    <div><strong>코스피 평균 점수</strong> ${screening.averageScore == null ? "-" : formatScore(screening.averageScore) + "점"}</div>
-    <div><strong>갱신</strong> ${screening.updatedAt ? formatDateTime(screening.updatedAt) : "-"}</div>
+    <div><strong>코스피 전체 평균</strong> ${screening.averageScore == null ? "-" : formatScore(screening.averageScore) + "점"}</div>
+    <div><strong>마지막 갱신</strong> ${screening.updatedAt ? formatDateTime(screening.updatedAt) : "-"}</div>
+    <div><strong>최근 실행</strong> ${refreshedTier ? escapeHtml(refreshedTier.label) : "캐시 표시"}</div>
   `;
-  if (!items.length) {
-    els.candidateList.innerHTML = `<div class="empty">점수 갱신을 실행하세요.</div>`;
+  const tierCards = tiers.length ? `
+    <div class="tier-grid">
+      ${tiers.map(renderTierCard).join("")}
+    </div>
+  ` : "";
+  const sections = displayOrder
+    .map((tierId) => {
+      const tier = tiers.find((row) => row.id === tierId) || { id: tierId, label: tierLabel(tierId) };
+      const rows = Array.isArray(tierRows[tierId]) ? tierRows[tierId] : [];
+      if (!rows.length) return "";
+      const visibleRows = rows.slice(0, tierId === "top_200_hourly" || tierId === "full_nightly" ? 200 : rows.length);
+      return `
+        <section class="tier-section">
+          <div class="tier-list-title">
+            <strong>${escapeHtml(tier.label || tierLabel(tierId))}</strong>
+            <span>${visibleRows.length}개 · ${escapeHtml(tier.modeLabel || "")}</span>
+          </div>
+          ${visibleRows.map((rawItem, index) => renderCandidateCard(normalizeCandidate(rawItem), index)).join("")}
+        </section>
+      `;
+    })
+    .filter(Boolean)
+    .join("");
+  if (!sections && !activeItems.length) {
+    els.candidateList.innerHTML = `${tierCards}<div class="empty">후보 티어 갱신을 실행하세요. 전체 분석은 20:00~익일 08:00에 실행됩니다.</div>`;
     return;
   }
-  els.candidateList.innerHTML = items.slice(0, 200).map((rawItem, index) => {
-    const item = normalizeCandidate(rawItem);
-    return `
+  els.candidateList.innerHTML = `${tierCards}${sections}`;
+}
+
+function renderTierCard(tier) {
+  const statusClass = tier.refreshed ? "fresh" : tier.isDue ? "due" : tier.isAllowedNow ? "ready" : "locked";
+  const statusText = tier.refreshed ? "방금 갱신" : tier.isDue ? "갱신 필요" : tier.isAllowedNow ? "대기" : "시간 전";
+  return `
+    <article class="tier-card ${statusClass}">
+      <div>
+        <strong>${escapeHtml(tier.label || "")}</strong>
+        <span>${escapeHtml(tier.scope || "")}</span>
+      </div>
+      <div class="tier-meta">
+        <span>${escapeHtml(tier.intervalLabel || "")}</span>
+        <span>${escapeHtml(tier.modeLabel || "")}</span>
+        <span>${formatNumber(tier.rowCount || 0)}개</span>
+      </div>
+      <div class="tier-time">
+        <span>${statusText}</span>
+        <small>마지막 ${tier.lastRunAt ? formatDateTime(tier.lastRunAt) : "-"}</small>
+        <small>다음 ${tier.nextDueAt ? formatDateTime(tier.nextDueAt) : "-"}</small>
+      </div>
+    </article>
+  `;
+}
+
+function renderCandidateCard(item, index) {
+  return `
     <article class="candidate-card">
       <div class="card-head">
         <strong>${index + 1}. ${escapeHtml(item.name)} <small>${escapeHtml(item.ticker)}</small></strong>
@@ -564,12 +628,20 @@ function renderCandidates() {
       <div class="candidate-meta">
         <span class="chip">${escapeHtml(item.recommendation || gradeLabel(item.finalScore))}</span>
         <span class="chip">PER ${formatNumber(item.per)}</span>
-        <span class="chip">ROE ${formatNumber(item.roe)}</span>
+        <span class="chip">PBR ${formatNumber(item.pbr)}</span>
+        ${item.currentPrice ? `<span class="chip">현재가 ${formatWon(item.currentPrice)}</span>` : ""}
       </div>
       <button class="ghost-button" type="button" onclick="openAnalysis('${escapeJs(item.ticker)}')">종목 분석</button>
     </article>
   `;
-  }).join("");
+}
+
+function tierLabel(tierId) {
+  if (tierId === "full_nightly") return "코스피 전체 분석";
+  if (tierId === "top_200_hourly") return "점수 상위 200개";
+  if (tierId === "top_50_5min") return "점수 상위 50개";
+  if (tierId === "top_20_realtime") return "점수 상위 20개";
+  return tierId;
 }
 
 function gradeLabel(score) {
@@ -636,14 +708,35 @@ function normalizeCandidate(item) {
   return { ...item, ticker: ticker || item.ticker, name: displayStockName(ticker, item.name) };
 }
 
+function normalizeScreeningPayload(payload) {
+  const base = payload && typeof payload === "object" ? payload : {};
+  const tierRows = {};
+  const rawTierRows = base.tierRows && typeof base.tierRows === "object" ? base.tierRows : {};
+  Object.entries(rawTierRows).forEach(([tierId, rows]) => {
+    tierRows[tierId] = Array.isArray(rows) ? rows.map(normalizeCandidate) : [];
+  });
+  const items = Array.isArray(base.items) ? base.items.map(normalizeCandidate) : [];
+  if (!Object.keys(tierRows).length && items.length) {
+    tierRows[base.activeTierId || "top_200_hourly"] = items;
+  }
+  return {
+    updatedAt: base.updatedAt || "",
+    averageScore: base.averageScore == null ? null : Number(base.averageScore),
+    refreshedTierId: base.refreshedTierId || "",
+    activeTierId: base.activeTierId || "",
+    message: base.message || "",
+    tiers: Array.isArray(base.tiers) ? base.tiers : [],
+    tierRows,
+    items
+  };
+}
+
 function repairStateStockNames() {
   Object.keys(state.analyses || {}).forEach((ticker) => {
     state.analyses[ticker] = normalizeAnalysis(state.analyses[ticker]);
   });
   state.watchlist = state.watchlist.map((row) => normalizeCandidate(row));
-  if (state.screening && Array.isArray(state.screening.items)) {
-    state.screening.items = state.screening.items.map(normalizeCandidate);
-  }
+  state.screening = normalizeScreeningPayload(state.screening);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 }
 
