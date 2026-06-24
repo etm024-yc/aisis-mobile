@@ -5,6 +5,7 @@
 ## 파일 역할
 
 - `index.html`, `styles.css`, `app.js`: 핸드폰에서 바로 여는 웹앱
+- `kospi_stocks.json`: 종목코드/기업명 자동완성용 KOSPI 종목 목록
 - `manifest.webmanifest`, `sw.js`, `app-icon.svg`: 홈 화면 설치용 PWA 파일
 - `google-drive-sync.gs`: Google Drive 저장과 현재가/분석 API를 담당하는 Apps Script
 

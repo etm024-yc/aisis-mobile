@@ -21,6 +21,7 @@ function doGet(e) {
     const action = String(params.action || "load");
     if (action === "load") return output_(loadSnapshot_(), callback);
     if (action === "quote") return output_({ ok: true, quote: fetchQuote_(params.ticker || params.query) }, callback);
+    if (action === "searchStocks") return output_({ ok: true, items: searchStocks_(params.query, Number(params.limit || 20)) }, callback);
     if (action === "analyze") return output_({ ok: true, analysis: analyzeStock_(params.query || params.ticker, Number(params.seedMoney || 0)) }, callback);
     if (action === "screenKospi") return output_(screenKospi_(Number(params.pages || 80), Number(params.limit || 200)), callback);
     return output_({ ok: false, error: "unknown action" }, callback);
@@ -137,12 +138,40 @@ function resolveStock_(query) {
   const raw = String(query || "").trim();
   const digits = raw.replace(/\D/g, "");
   if (digits.length === 6) return { ticker: digits, name: "", market: "KOSPI" };
-  const stocks = fetchMarketSummary_(80);
-  const normalized = normalizeText_(raw);
-  const found = stocks.find((stock) => normalizeText_(stock.name) === normalized) ||
-    stocks.find((stock) => normalizeText_(stock.name).indexOf(normalized) >= 0);
+  const found = searchStocks_(raw, 1)[0];
   if (!found) throw new Error("종목을 찾지 못했습니다. 6자리 종목코드로 다시 입력하세요.");
   return found;
+}
+
+function searchStocks_(query, limit) {
+  const raw = String(query || "").trim();
+  const digits = raw.replace(/\D/g, "");
+  const normalized = normalizeText_(raw);
+  const stocks = fetchMarketSummary_(80);
+  const scored = [];
+  stocks.forEach((stock) => {
+    const name = normalizeText_(stock.name);
+    let score = 0;
+    if (digits) {
+      if (stock.ticker === digits) score = 100;
+      else if (digits.length >= 4 && stock.ticker.indexOf(digits) === 0) score = 90;
+      else return;
+    } else {
+      if (normalized.length < 2) return;
+      if (name === normalized) score = 100;
+      else if (name.indexOf(normalized) === 0) score = 90;
+      else if (name.indexOf(normalized) >= 0) score = 70;
+      else return;
+    }
+    scored.push(Object.assign({}, stock, { _score: score }));
+  });
+  return scored
+    .sort((a, b) => b._score - a._score || String(a.name).localeCompare(String(b.name), "ko"))
+    .slice(0, Math.max(1, Math.min(Number(limit || 20), 50)))
+    .map((stock) => {
+      delete stock._score;
+      return stock;
+    });
 }
 
 function fetchQuote_(query) {

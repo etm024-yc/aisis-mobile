@@ -6,6 +6,7 @@ const SEED_MONEY_KEY = "aisis-mobile-seed-money-v1";
 const SCREEN_PAGES_KEY = "aisis-mobile-screen-pages-v1";
 const SYNC_DEBOUNCE_MS = 1200;
 const POLL_INTERVAL_MS = 60 * 1000;
+const SEARCH_DEBOUNCE_MS = 220;
 
 const defaultState = {
   version: "aisis-mobile-v1",
@@ -19,11 +20,14 @@ const defaultState = {
 let state = loadLocalState();
 let syncTimer = null;
 let activeAnalysis = null;
+let stockUniverse = [];
+let searchTimer = null;
 
 const els = {
   syncBadge: document.querySelector("#syncBadge"),
   refreshAllButton: document.querySelector("#refreshAllButton"),
   stockQuery: document.querySelector("#stockQuery"),
+  stockSuggestions: document.querySelector("#stockSuggestions"),
   analyzeButton: document.querySelector("#analyzeButton"),
   signalBoard: document.querySelector("#signalBoard"),
   trafficLight: document.querySelector("#trafficLight"),
@@ -72,6 +76,7 @@ function init() {
   els.autoSync.checked = localStorage.getItem(SYNC_AUTO_KEY) !== "false";
 
   bindEvents();
+  loadStockUniverse();
   renderAll();
   syncOnStart();
   setInterval(() => refreshLiveData({ quiet: true }), POLL_INTERVAL_MS);
@@ -82,8 +87,16 @@ function bindEvents() {
     button.addEventListener("click", () => switchView(button.dataset.view));
   });
   els.analyzeButton.addEventListener("click", () => analyzeQuery());
+  els.stockQuery.addEventListener("input", () => queueStockSearch());
+  els.stockQuery.addEventListener("focus", () => queueStockSearch());
   els.stockQuery.addEventListener("keydown", (event) => {
     if (event.key === "Enter") analyzeQuery();
+    if (event.key === "Escape") hideStockSuggestions();
+  });
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest(".search-panel") && !event.target.closest("#stockSuggestions")) {
+      hideStockSuggestions();
+    }
   });
   els.refreshAllButton.addEventListener("click", () => refreshLiveData({ quiet: false }));
   els.refreshHoldingsButton.addEventListener("click", () => refreshHoldings());
@@ -97,6 +110,119 @@ function bindEvents() {
 function switchView(viewId) {
   els.views.forEach((view) => view.classList.toggle("active", view.id === viewId));
   els.navButtons.forEach((button) => button.classList.toggle("active", button.dataset.view === viewId));
+}
+
+async function loadStockUniverse() {
+  try {
+    const response = await fetch("./kospi_stocks.json?v=20260624", { cache: "no-store" });
+    if (!response.ok) throw new Error("stock universe not found");
+    const payload = await response.json();
+    stockUniverse = Array.isArray(payload.items) ? payload.items : [];
+  } catch (error) {
+    stockUniverse = [];
+  }
+}
+
+function queueStockSearch() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(renderStockSuggestions, SEARCH_DEBOUNCE_MS);
+}
+
+async function renderStockSuggestions() {
+  const query = els.stockQuery.value.trim();
+  if (!shouldShowStockSuggestions(query)) {
+    hideStockSuggestions();
+    return;
+  }
+  let matches = searchStockUniverse(query, 12);
+  if (!matches.length) {
+    matches = await searchStocksRemotely(query);
+  }
+  if (!matches.length) {
+    els.stockSuggestions.hidden = false;
+    els.stockSuggestions.innerHTML = `<div class="suggestion-empty">일치하는 종목이 없습니다.</div>`;
+    return;
+  }
+  els.stockSuggestions.hidden = false;
+  els.stockSuggestions.innerHTML = matches
+    .map((stock) => `
+      <button class="suggestion-item" type="button" data-ticker="${escapeHtml(stock.ticker)}" data-name="${escapeHtml(stock.name || "")}" data-market="${escapeHtml(stock.market || "KOSPI")}">
+        <strong>${escapeHtml(stock.ticker)} · ${escapeHtml(stock.name)}</strong>
+        <span>${escapeHtml(stock.market || "KOSPI")}${stock.current_price ? ` · ${formatWon(stock.current_price)}` : ""}</span>
+      </button>
+    `)
+    .join("");
+  els.stockSuggestions.querySelectorAll(".suggestion-item").forEach((button) => {
+    button.addEventListener("click", () => {
+      const stock = stockUniverse.find((row) => row.ticker === button.dataset.ticker);
+      selectStockSuggestion(stock || {
+        ticker: button.dataset.ticker,
+        name: button.dataset.name || "",
+        market: button.dataset.market || "KOSPI"
+      });
+    });
+  });
+}
+
+async function searchStocksRemotely(query) {
+  const config = getSyncConfig();
+  if (!config) return [];
+  try {
+    const payload = await jsonp(config.url, {
+      action: "searchStocks",
+      token: config.token,
+      query,
+      limit: "12"
+    });
+    if (!payload.ok) throw new Error(payload.error || "종목 검색 실패");
+    return Array.isArray(payload.items) ? payload.items : [];
+  } catch (error) {
+    setStatus(friendlySyncError(error), "error");
+    return [];
+  }
+}
+
+function shouldShowStockSuggestions(query) {
+  const digits = query.replace(/\D/g, "");
+  if (digits && digits.length >= 4) return true;
+  if (!digits && normalizeText(query).length >= 2) return true;
+  return false;
+}
+
+function searchStockUniverse(query, limit = 12) {
+  const digits = query.replace(/\D/g, "");
+  const normalized = normalizeText(query);
+  const scored = [];
+  stockUniverse.forEach((stock) => {
+    const name = normalizeText(stock.name || "");
+    let score = 0;
+    if (digits) {
+      if (stock.ticker === digits) score = 100;
+      else if (stock.ticker && stock.ticker.startsWith(digits)) score = 90;
+      else return;
+    } else {
+      if (name === normalized) score = 100;
+      else if (name.startsWith(normalized)) score = 90;
+      else if (name.includes(normalized)) score = 70;
+      else return;
+    }
+    scored.push({ ...stock, _score: score });
+  });
+  return scored
+    .sort((a, b) => b._score - a._score || String(a.name).localeCompare(String(b.name), "ko"))
+    .slice(0, limit);
+}
+
+function selectStockSuggestion(stock) {
+  els.stockQuery.value = `${stock.ticker} ${stock.name}`;
+  hideStockSuggestions();
+  state.watchlist = state.watchlist.map((row) => (row.ticker === stock.ticker ? { ...row, name: stock.name } : row));
+}
+
+function hideStockSuggestions() {
+  if (!els.stockSuggestions) return;
+  els.stockSuggestions.hidden = true;
+  els.stockSuggestions.innerHTML = "";
 }
 
 function loadLocalState() {
@@ -167,8 +293,10 @@ async function analyzeQuery(query = els.stockQuery.value.trim()) {
     }
     setStatus("분석을 완료했습니다.");
   } catch (error) {
-    setSignal("red", "분석 실패", error.message);
-    setStatus(error.message, "error");
+    const message = friendlySyncError(error);
+    setSignal("red", "분석 실패", message);
+    setStatus(message, "error");
+    if (isUnauthorizedError(error)) switchView("settingsView");
   }
 }
 
@@ -404,7 +532,8 @@ async function screenKospi() {
     saveLocalState();
     setStatus("코스피 점수를 갱신했습니다.");
   } catch (error) {
-    setStatus(error.message, "error");
+    setStatus(friendlySyncError(error), "error");
+    if (isUnauthorizedError(error)) switchView("settingsView");
   }
 }
 
@@ -536,7 +665,7 @@ async function pullSync({ quiet = false, onlyIfRemoteNewer = false } = {}) {
     }
     if (!quiet) setStatus("Google Drive에서 불러왔습니다.");
   } catch (error) {
-    if (!quiet) setStatus(error.message, "error");
+    if (!quiet) setStatus(friendlySyncError(error), "error");
   }
 }
 
@@ -554,7 +683,7 @@ async function pushSync({ quiet = false } = {}) {
     await fetch(config.url, { method: "POST", mode: "no-cors", body });
     if (!quiet) setStatus("Google Drive에 저장했습니다.");
   } catch (error) {
-    if (!quiet) setStatus(error.message, "error");
+    if (!quiet) setStatus(friendlySyncError(error), "error");
   }
 }
 
@@ -591,6 +720,17 @@ function jsonp(url, params) {
 function setStatus(message, tone = "neutral") {
   els.statusBox.textContent = message;
   els.statusBox.dataset.tone = tone;
+}
+
+function isUnauthorizedError(error) {
+  return String(error?.message || error || "").toLowerCase().includes("unauthorized");
+}
+
+function friendlySyncError(error) {
+  if (isUnauthorizedError(error)) {
+    return "인증 실패: 앱 설정의 동기화 비밀번호와 Apps Script의 SYNC_TOKEN이 다릅니다. Code.gs 맨 위 SYNC_TOKEN을 확인하고 새 버전으로 배포하세요.";
+  }
+  return String(error?.message || error || "요청에 실패했습니다.");
 }
 
 function makeId() {

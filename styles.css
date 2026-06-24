@@ -105,6 +105,45 @@ main {
   padding: 12px;
 }
 
+.suggestion-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.suggestion-item {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  min-height: 48px;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: #f8faf9;
+  color: var(--ink);
+  text-align: left;
+}
+
+.suggestion-item strong {
+  font-size: 14px;
+}
+
+.suggestion-item span,
+.suggestion-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.suggestion-item:active {
+  border-color: var(--primary);
+  background: #e7f3f1;
+}
+
 label {
   display: grid;
   gap: 6px;
