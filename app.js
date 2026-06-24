@@ -24,6 +24,7 @@ const NASDAQ_FALLBACK_STOCKS = [
   { ticker: "NFLX", name: "Netflix", market: "NASDAQ" },
   { ticker: "AMD", name: "AMD", market: "NASDAQ" }
 ];
+const TIER_DISPLAY_ORDER = ["top_20_realtime", "top_50_5min", "top_200_hourly", "full_nightly"];
 
 const defaultState = {
   version: "aisis-mobile-v1",
@@ -47,8 +48,10 @@ let transactionFormOpen = false;
 let candidateDialogTierId = "";
 let candidateDialogSort = "score_desc";
 let candidateDialogFilters = new Set(["strong", "review", "watch", "other"]);
+let busyCount = 0;
 
 const els = {
+  workBanner: document.querySelector("#workBanner"),
   syncBadge: document.querySelector("#syncBadge"),
   marketSelect: document.querySelector("#marketSelect"),
   refreshAllButton: document.querySelector("#refreshAllButton"),
@@ -436,18 +439,23 @@ function updateMarketPlaceholder() {
   }
 }
 
-async function analyzeQuery(query = els.stockQuery.value.trim()) {
+async function analyzeQuery(query = els.stockQuery.value.trim(), options = {}) {
+  const quiet = Boolean(options.quiet);
   if (!query) {
-    setStatus("종목 코드나 기업명을 입력하세요.");
+    if (!quiet) setStatus("종목 코드나 기업명을 입력하세요.");
     return;
   }
   const config = getSyncConfig();
   if (!config) {
-    setStatus("설정에서 Apps Script URL과 동기화 비밀번호를 먼저 입력하세요.", "warn");
+    if (!quiet) setStatus("설정에서 Apps Script URL과 동기화 비밀번호를 먼저 입력하세요.", "warn");
     switchView("settingsView");
     return;
   }
-  setSignal("neutral", "분석 중", "현재가와 기준 점수를 계산하고 있습니다.");
+  if (!quiet) {
+    setSignal("neutral", "분석 중", "현재가와 기준 점수를 계산하고 있습니다.");
+    setBusy("종목 분석 중입니다.");
+  }
+  let busyResult = "분석 완료";
   try {
     const payload = await jsonp(config.url, {
       action: "analyze",
@@ -464,12 +472,17 @@ async function analyzeQuery(query = els.stockQuery.value.trim()) {
       saveLocalState();
       els.stockQuery.value = formatStockLabel(activeAnalysis);
     }
-    setStatus("분석을 완료했습니다.");
+    if (!quiet) setStatus("분석을 완료했습니다.");
   } catch (error) {
+    busyResult = "분석 실패";
     const message = friendlySyncError(error);
-    setSignal("red", "분석 실패", message);
-    setStatus(message, "error");
+    if (!quiet) {
+      setSignal("red", "분석 실패", message);
+      setStatus(message, "error");
+    }
     if (isUnauthorizedError(error)) switchView("settingsView");
+  } finally {
+    if (!quiet) clearBusy(busyResult);
   }
 }
 
@@ -763,8 +776,13 @@ function calculatePositions(transactions) {
 async function refreshHoldings() {
   const marketBase = selectedMarket();
   const positions = calculatePositions(state.transactions).filter((position) => normalizeMarket(position.market) === marketBase);
-  for (const position of positions) {
-    await openAnalysis(position.ticker, position.market, { stayOnPortfolio: true });
+  setBusy("보유 종목 분석 중입니다.");
+  try {
+    for (const position of positions) {
+      await openAnalysis(position.ticker, position.market, { stayOnPortfolio: true, quiet: true });
+    }
+  } finally {
+    clearBusy("보유 종목 갱신 완료");
   }
   switchView("portfolioView");
 }
@@ -824,7 +842,12 @@ async function refreshCandidateTiers({ quiet = false, forceTierId = "" } = {}) {
     return;
   }
   const market = selectedMarket();
-  if (!quiet) setStatus(forceTierId ? `${marketLabel(market)} ${tierLabel(forceTierId)} 강제 갱신 중입니다.` : `${marketLabel(market)} 후보 티어를 확인하고 있습니다.`);
+  if (!quiet) {
+    const message = forceTierId ? `${marketLabel(market)} ${tierLabel(forceTierId)} 강제 갱신 중입니다.` : `${marketLabel(market)} 후보 티어를 확인하고 있습니다.`;
+    setStatus(message);
+    setBusy(message);
+  }
+  let busyResult = "후보 갱신 완료";
   try {
     const payload = await jsonp(config.url, {
       action: "screenMarket",
@@ -839,10 +862,14 @@ async function refreshCandidateTiers({ quiet = false, forceTierId = "" } = {}) {
     if (!payload.ok) throw new Error(payload.error || "후보 갱신 실패");
     saveScreeningForMarket(payload, market);
     saveLocalState({ touch: false, push: false });
-    if (!quiet) setStatus(payload.message || "후보 티어를 확인했습니다.");
+    busyResult = payload.message || "후보 티어를 확인했습니다.";
+    if (!quiet) setStatus(busyResult);
   } catch (error) {
+    busyResult = "후보 갱신 실패";
     if (!quiet) setStatus(friendlySyncError(error), "error");
     if (isUnauthorizedError(error)) switchView("settingsView");
+  } finally {
+    if (!quiet) clearBusy(busyResult);
   }
 }
 
@@ -850,7 +877,7 @@ function renderCandidates() {
   const market = selectedMarket();
   const screening = screeningForMarket(market);
   const tierRows = screening.tierRows || {};
-  const tiers = Array.isArray(screening.tiers) && screening.tiers.length ? screening.tiers : defaultScreeningTiers(market);
+  const tiers = orderedTiers(Array.isArray(screening.tiers) && screening.tiers.length ? screening.tiers : defaultScreeningTiers(market));
   const refreshedTier = tiers.find((tier) => tier.id === screening.refreshedTierId);
   els.marketSummary.innerHTML = `
     <div><strong>${marketLabel(market)} 전체 평균</strong> ${screening.averageScore == null ? "-" : formatScore(screening.averageScore) + "점"}</div>
@@ -868,6 +895,14 @@ function renderCandidates() {
     return;
   }
   els.candidateList.innerHTML = `${tierCards}<div class="empty">각 후보군 카드를 누르면 순위 목록이 팝업으로 열립니다.</div>`;
+}
+
+function orderedTiers(tiers) {
+  return [...(tiers || [])].sort((a, b) => {
+    const aIndex = TIER_DISPLAY_ORDER.indexOf(a.id);
+    const bIndex = TIER_DISPLAY_ORDER.indexOf(b.id);
+    return (aIndex === -1 ? 999 : aIndex) - (bIndex === -1 ? 999 : bIndex);
+  });
 }
 
 function renderTierCard(tier) {
@@ -1055,10 +1090,10 @@ function tierLabel(tierId) {
 function defaultScreeningTiers(market = selectedMarket()) {
   const label = marketLabel(market);
   return [
-    { id: "full_nightly", label: `${label} 전체 분석`, scope: `${label} BASE 전체`, intervalLabel: "1일", modeLabel: "전체 점수", rowCount: 0, blockedReason: "강제 갱신 가능" },
-    { id: "top_200_hourly", label: "점수 상위 200개", scope: "전체 분석 점수 상위 200개", intervalLabel: "1시간", modeLabel: "심층 분석", rowCount: 0, blockedReason: "강제 갱신 가능" },
+    { id: "top_20_realtime", label: "점수 상위 20개", scope: "50개 분석 결과 중 점수 상위 20개", intervalLabel: "30초", modeLabel: "초단위 가격 모니터링", rowCount: 0, blockedReason: "강제 갱신 가능" },
     { id: "top_50_5min", label: "점수 상위 50개", scope: "200개 분석 결과 중 점수 상위 50개", intervalLabel: "5분", modeLabel: "집중 분석", rowCount: 0, blockedReason: "강제 갱신 가능" },
-    { id: "top_20_realtime", label: "점수 상위 20개", scope: "50개 분석 결과 중 점수 상위 20개", intervalLabel: "30초", modeLabel: "초단위 가격 모니터링", rowCount: 0, blockedReason: "강제 갱신 가능" }
+    { id: "top_200_hourly", label: "점수 상위 200개", scope: "전체 분석 점수 상위 200개", intervalLabel: "1시간", modeLabel: "심층 분석", rowCount: 0, blockedReason: "강제 갱신 가능" },
+    { id: "full_nightly", label: `${label} 전체 분석`, scope: `${label} BASE 전체`, intervalLabel: "1일", modeLabel: "전체 점수", rowCount: 0, blockedReason: "강제 갱신 가능" }
   ];
 }
 
@@ -1080,7 +1115,7 @@ async function openAnalysis(query, market, options = {}) {
   }
   if (!options.stayOnPortfolio) switchView("analysisView");
   els.stockQuery.value = query;
-  await analyzeQuery(query);
+  await analyzeQuery(query, { quiet: Boolean(options.quiet) });
 }
 
 function addWatchlistFromActive() {
@@ -1321,7 +1356,7 @@ async function refreshLiveData({ quiet = false } = {}) {
   if (!quiet) setStatus("최신 데이터를 확인하고 있습니다.");
   const market = selectedMarket();
   if (activeAnalysis?.ticker && normalizeMarket(activeAnalysis.market || market) === market) {
-    await analyzeQuery(activeAnalysis.ticker);
+    await analyzeQuery(activeAnalysis.ticker, { quiet });
   }
   if (!quiet) setStatus("새로고침 완료");
 }
@@ -1362,6 +1397,8 @@ async function pullSync({ quiet = false, onlyIfRemoteNewer = false } = {}) {
     if (!quiet) setStatus("동기화 설정이 없습니다.", "warn");
     return;
   }
+  if (!quiet) setBusy("Google Drive에서 불러오는 중입니다.");
+  let busyResult = "불러오기 완료";
   try {
     const payload = await jsonp(config.url, { action: "load", token: config.token });
     if (!payload.ok) throw new Error(payload.error || "불러오기 실패");
@@ -1375,7 +1412,10 @@ async function pullSync({ quiet = false, onlyIfRemoteNewer = false } = {}) {
     }
     if (!quiet) setStatus("Google Drive에서 불러왔습니다.");
   } catch (error) {
+    busyResult = "불러오기 실패";
     if (!quiet) setStatus(friendlySyncError(error), "error");
+  } finally {
+    if (!quiet) clearBusy(busyResult);
   }
 }
 
@@ -1432,6 +1472,8 @@ async function pushSync({ quiet = false } = {}) {
     if (!quiet) setStatus("동기화 설정이 없습니다.", "warn");
     return;
   }
+  if (!quiet) setBusy("Google Drive에 저장하는 중입니다.");
+  let busyResult = "저장 완료";
   try {
     const body = new FormData();
     body.append("action", "save");
@@ -1440,7 +1482,10 @@ async function pushSync({ quiet = false } = {}) {
     await fetch(config.url, { method: "POST", mode: "no-cors", body });
     if (!quiet) setStatus("Google Drive에 저장했습니다.");
   } catch (error) {
+    busyResult = "저장 실패";
     if (!quiet) setStatus(friendlySyncError(error), "error");
+  } finally {
+    if (!quiet) clearBusy(busyResult);
   }
 }
 
@@ -1472,6 +1517,23 @@ function jsonp(url, params) {
     script.src = endpoint.toString();
     document.body.appendChild(script);
   });
+}
+
+function setBusy(message) {
+  if (!els.workBanner) return;
+  busyCount += 1;
+  els.workBanner.hidden = false;
+  els.workBanner.textContent = message || "작업 중입니다.";
+}
+
+function clearBusy(message = "") {
+  if (!els.workBanner) return;
+  busyCount = Math.max(0, busyCount - 1);
+  if (message) els.workBanner.textContent = message;
+  if (busyCount > 0) return;
+  window.setTimeout(() => {
+    if (busyCount === 0 && els.workBanner) els.workBanner.hidden = true;
+  }, message ? 1100 : 0);
 }
 
 function setStatus(message, tone = "neutral") {

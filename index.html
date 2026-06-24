@@ -7,7 +7,7 @@
     <meta name="theme-color" content="#0f766e" />
     <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="apple-touch-icon" href="./app-icon.svg" />
-    <link rel="stylesheet" href="./styles.css?v=20260625-force-tier" />
+    <link rel="stylesheet" href="./styles.css?v=20260625-work-banner" />
   </head>
   <body>
     <div class="app-shell">
@@ -24,6 +24,7 @@
         </div>
         <button class="icon-button" id="refreshAllButton" type="button" title="새로고침" aria-label="새로고침">↻</button>
       </header>
+      <div class="work-banner" id="workBanner" hidden>작업 대기 중</div>
 
       <main>
         <section class="view active" id="analysisView">
@@ -183,6 +184,6 @@
         <button class="nav-button" data-view="settingsView" type="button"><span>⚙</span><b>설정</b></button>
       </nav>
     </div>
-    <script src="./app.js?v=20260625-force-tier"></script>
+    <script src="./app.js?v=20260625-work-banner"></script>
   </body>
 </html>

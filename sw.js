@@ -1,4 +1,4 @@
-const CACHE_NAME = "aisis-mobile-v10-force-tier";
+const CACHE_NAME = "aisis-mobile-v11-work-banner";
 const ASSETS = ["./", "./index.html", "./styles.css", "./app.js", "./kospi_stocks.json", "./manifest.webmanifest", "./app-icon.svg"];
 
 self.addEventListener("install", (event) => {

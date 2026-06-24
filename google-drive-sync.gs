@@ -534,6 +534,7 @@ function fetchNasdaqFundamental_(ticker, quote) {
     source: "Yahoo Finance chart",
     note: "나스닥 모바일 분석은 현재 가격, 거래량, 이동평균, RSI 중심으로 계산합니다."
   };
+  let yahooFundamental = null;
   try {
     const summary = fetchYahooQuoteSummary_(ticker, "defaultKeyStatistics,financialData,summaryDetail,price");
     const stats = summary.defaultKeyStatistics || {};
@@ -544,7 +545,7 @@ function fetchNasdaqFundamental_(ticker, quote) {
     const per = yahooNumber_(detail.trailingPE) || yahooNumber_(detail.forwardPE) || yahooNumber_(stats.trailingPE) || yahooNumber_(stats.forwardPE);
     const pbr = yahooNumber_(stats.priceToBook);
     const dividendYield = yahooNumber_(detail.dividendYield);
-    return {
+    yahooFundamental = {
       ticker,
       eps,
       bps,
@@ -559,8 +560,15 @@ function fetchNasdaqFundamental_(ticker, quote) {
       note: pbr == null ? "PBR은 Yahoo에서 제공되지 않는 종목이 있어 비어 있을 수 있습니다." : ""
     };
   } catch (error) {
-    return fallback;
+    yahooFundamental = fallback;
   }
+  let naverFundamental = null;
+  try {
+    naverFundamental = fetchNaverWorldFundamental_(ticker);
+  } catch (error) {
+    naverFundamental = null;
+  }
+  return mergeNasdaqFundamental_(fallback, yahooFundamental, naverFundamental, quote);
 }
 
 function fetchYahooQuoteSummary_(ticker, modules) {
@@ -574,6 +582,66 @@ function fetchYahooQuoteSummary_(ticker, modules) {
 function yahooNumber_(value) {
   if (value && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, "raw")) return nullableNumber_(value.raw);
   return nullableNumber_(value);
+}
+
+function fetchNaverWorldFundamental_(ticker) {
+  ticker = normalizeNasdaqSymbol_(ticker);
+  const url = "https://m.stock.naver.com/worldstock/stock/" + encodeURIComponent(ticker + ".O") + "/total";
+  const text = stripTags_(fetchText_(url, "UTF-8")).replace(/\s+/g, " ");
+  return {
+    ticker,
+    eps: naverWorldMetric_(text, "EPS"),
+    bps: naverWorldMetric_(text, "BPS"),
+    per: naverWorldMetric_(text, "PER"),
+    pbr: naverWorldMetric_(text, "PBR"),
+    dividend_yield: naverWorldMetric_(text, "배당수익률"),
+    source: "Naver Pay Securities"
+  };
+}
+
+function mergeNasdaqFundamental_(fallback, yahooFundamental, naverFundamental, quote) {
+  const merged = Object.assign({}, fallback, yahooFundamental || {});
+  if (naverFundamental) {
+    ["eps", "bps", "per", "pbr", "dividend_yield", "revenue", "operatingIncome", "revenueGrowth", "operatingIncomeGrowth"].forEach((key) => {
+      merged[key] = firstNumber_(merged[key], naverFundamental[key]);
+    });
+  }
+  const currentPrice = nullableNumber_(quote && quote.currentPrice);
+  if (merged.per == null && merged.eps && currentPrice) merged.per = currentPrice / merged.eps;
+  if (merged.pbr == null && merged.bps && currentPrice) merged.pbr = currentPrice / merged.bps;
+  const sources = [];
+  if (yahooFundamental && yahooFundamental.source && yahooFundamental.source !== fallback.source) sources.push(yahooFundamental.source);
+  if (naverFundamental && naverFundamental.source) sources.push(naverFundamental.source);
+  merged.source = sources.length ? sources.join(" + ") : fallback.source;
+  if (naverFundamental && (naverFundamental.per != null || naverFundamental.pbr != null)) {
+    merged.note = "Yahoo 재무지표를 우선 사용하고, 비어 있는 PER/PBR/EPS/BPS/배당 값은 네이버 해외증권으로 보강했습니다.";
+  }
+  return merged;
+}
+
+function naverWorldMetric_(text, label) {
+  const escaped = escapeRegex_(label);
+  const patterns = [
+    new RegExp(escaped + "\\s*\\d{4}\\.\\d{2}\\.\\s*([-+]?\\d[\\d,]*(?:\\.\\d+)?)", "i"),
+    new RegExp(escaped + "\\s+([-+]?\\d[\\d,]*(?:\\.\\d+)?)", "i")
+  ];
+  for (let index = 0; index < patterns.length; index += 1) {
+    const match = patterns[index].exec(text || "");
+    if (match) return toNumber_(match[1]);
+  }
+  return null;
+}
+
+function firstNumber_() {
+  for (let index = 0; index < arguments.length; index += 1) {
+    const value = nullableNumber_(arguments[index]);
+    if (value != null) return value;
+  }
+  return null;
+}
+
+function escapeRegex_(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function fetchStooqDailyPrices_(ticker, count) {
@@ -1207,6 +1275,11 @@ function analysisToScreenerRow_(analysis, fallback) {
     upside: analysis.upside,
     per: analysis.fundamental && analysis.fundamental.per,
     pbr: analysis.fundamental && analysis.fundamental.pbr,
+    eps: analysis.fundamental && analysis.fundamental.eps,
+    bps: analysis.fundamental && analysis.fundamental.bps,
+    revenue: analysis.fundamental && analysis.fundamental.revenue,
+    revenueGrowth: analysis.fundamental && analysis.fundamental.revenueGrowth,
+    operatingIncomeGrowth: analysis.fundamental && analysis.fundamental.operatingIncomeGrowth,
     sourceTierScore: fallback.finalScore || null,
     fetchedAt: analysis.fetchedAt
   };
@@ -1473,6 +1546,10 @@ function scoreNasdaqMarketRow_(stock) {
   let momentumScore = 55;
   let safetyScore = 60;
   const per = Number(stock.per);
+  const pbr = Number(stock.pbr);
+  const eps = Number(stock.eps);
+  const bps = Number(stock.bps);
+  const revenueGrowth = Number(stock.revenueGrowth);
   const marketCap = Number(stock.marketCap || 0);
   const currentPrice = Number(stock.currentPrice || 0);
   const ma50 = Number(stock.ma50 || 0);
@@ -1481,6 +1558,8 @@ function scoreNasdaqMarketRow_(stock) {
   if (per > 0 && per <= 25) valueScore += 12;
   else if (per > 25 && per <= 40) valueScore += 4;
   else if (per > 60) valueScore -= 8;
+  if (pbr > 0 && pbr <= 3) valueScore += 8;
+  else if (pbr > 10) valueScore -= 5;
   if (marketCap >= 200000000000) safetyScore += 16;
   else if (marketCap >= 50000000000) safetyScore += 10;
   else if (marketCap >= 10000000000) safetyScore += 4;
@@ -1488,7 +1567,12 @@ function scoreNasdaqMarketRow_(stock) {
   if (ma50 && ma200 && ma50 >= ma200) momentumScore += 12;
   if (Number(stock.changeRate) > 0) momentumScore += 4;
   if (per > 0 && per <= 35 && marketCap >= 10000000000) qualityScore += 8;
+  if (eps > 0) qualityScore += 6;
+  if (bps > 0) qualityScore += 4;
   if (marketCap >= 50000000000) qualityScore += 8;
+  if (revenueGrowth > 0.15) growthScore += 10;
+  else if (revenueGrowth > 0.05) growthScore += 5;
+  else if (revenueGrowth < -0.10) growthScore -= 6;
   const tradedValue = currentPrice * volume;
   const liquidityScore = tradedValue >= 5000000000 ? 90 : tradedValue >= 1000000000 ? 82 : tradedValue >= 250000000 ? 72 : tradedValue >= 50000000 ? 60 : 45;
   const finalScore = clamp_(valueScore) * 0.2 + clamp_(qualityScore) * 0.25 + clamp_(growthScore) * 0.15 + clamp_(momentumScore) * 0.2 + clamp_(safetyScore) * 0.1 + liquidityScore * 0.1;
@@ -1501,6 +1585,11 @@ function scoreNasdaqMarketRow_(stock) {
     marketCap: stock.marketCap,
     volume: stock.volume,
     per: stock.per,
+    pbr: stock.pbr,
+    eps: stock.eps,
+    bps: stock.bps,
+    revenue: stock.revenue,
+    revenueGrowth: stock.revenueGrowth,
     roe: stock.roe,
     fairValue: stock.fairValue || null,
     finalScore: rounded,
@@ -1541,6 +1630,8 @@ function fetchNasdaqMarketSummary_(pages) {
           pbr: nullableNumber_(quote.priceToBook),
           eps: nullableNumber_(quote.epsTrailingTwelveMonths || quote.epsForward),
           bps: nullableNumber_(quote.bookValue),
+          revenue: nullableNumber_(quote.totalRevenue),
+          revenueGrowth: nullableNumber_(quote.revenueGrowth),
           ma50: nullableNumber_(quote.fiftyDayAverage),
           ma200: nullableNumber_(quote.twoHundredDayAverage),
           changeRate: nullableNumber_(quote.regularMarketChangePercent)
@@ -1608,7 +1699,10 @@ function rowNumbers_(row) {
 function fetchText_(url, charset) {
   const response = UrlFetchApp.fetch(url, {
     muteHttpExceptions: true,
-    headers: { "User-Agent": "AISIS-Mobile/1.0" }
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36 AISIS-Mobile/1.0",
+      "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
+    }
   });
   const code = response.getResponseCode();
   if (code < 200 || code >= 300) throw new Error("데이터 요청 실패: HTTP " + code);
