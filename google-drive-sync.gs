@@ -1320,21 +1320,34 @@ function runScreeningTier_(tier, cache, pages, seedMoney, options) {
 
 function runNasdaqFullScreeningTier_(tier, cache, pages, options) {
   options = options || {};
-  const baseUniverse = getNasdaqBaseStocks_();
-  const maxItems = Math.min(Math.max(Number(pages || 80), 1) * 50, baseUniverse.length);
-  if (!maxItems) return { ran: false, reason: "나스닥 기준 종목 목록을 가져오지 못했습니다." };
+  const fallbackUniverse = getNasdaqBaseStocks_();
+  const requestedItems = Math.max(Number(pages || 80), 1) * 50;
   const previousTier = cache.tiers[tier.id] || {};
   const previousRows = Array.isArray(previousTier.rows) ? previousTier.rows : [];
   const previousMetadata = previousTier.metadata || {};
+  const knownUniverseCount = Number(previousMetadata.universeCount || fallbackUniverse.length || requestedItems);
+  const maxItems = Math.min(requestedItems, Math.max(knownUniverseCount, fallbackUniverse.length, NASDAQ_FULL_BATCH_SIZE));
+  if (!maxItems) return { ran: false, reason: "나스닥 기준 종목 목록을 가져오지 못했습니다." };
   const cursor = Math.max(0, Number(previousMetadata.cursor || 0)) % maxItems;
   const batchSize = Math.min(NASDAQ_FULL_BATCH_SIZE, maxItems);
-  const batchStocks = [];
-  for (let offset = 0; offset < batchSize; offset += 1) {
-    batchStocks.push(baseUniverse[(cursor + offset) % maxItems]);
+  let batchRows = [];
+  let universeCount = maxItems;
+  try {
+    const screener = fetchNasdaqScreenerRows_(batchSize, cursor);
+    batchRows = screener.rows;
+    universeCount = Math.min(requestedItems, Math.max(screener.totalRecords || 0, batchRows.length, fallbackUniverse.length));
+  } catch (error) {
+    const fallbackMax = Math.min(maxItems, fallbackUniverse.length);
+    const batchStocks = [];
+    for (let offset = 0; offset < batchSize && fallbackMax; offset += 1) {
+      batchStocks.push(fallbackUniverse[(cursor + offset) % fallbackMax]);
+    }
+    batchRows = fetchNasdaqMarketSummaryBatch_(batchStocks);
+    universeCount = fallbackMax || maxItems;
   }
-  const summaryRows = fetchNasdaqMarketSummaryBatch_(batchStocks).map(scoreMarketRow_);
+  const summaryRows = batchRows.map(scoreMarketRow_);
   const rows = combineRankedRows_(summaryRows, previousRows).slice(0, maxItems);
-  const nextCursor = (cursor + batchSize) % maxItems;
+  const nextCursor = (cursor + batchSize) % Math.max(universeCount, 1);
   cache.tiers[tier.id] = {
     lastRunAt: new Date().toISOString(),
     rows,
@@ -1347,15 +1360,15 @@ function runNasdaqFullScreeningTier_(tier, cache, pages, options) {
       batchSize,
       analyzedBatchCount: summaryRows.length,
       cursor: nextCursor,
-      universeCount: maxItems,
+      universeCount,
       coverageCount: rows.length,
       completedSweep: nextCursor <= cursor
     }
   };
   return {
     ran: true,
-    partial: rows.length < maxItems || nextCursor !== 0,
-    message: "나스닥 전체 분석 " + summaryRows.length + "개 갱신, 누적 " + rows.length + "/" + maxItems + "개입니다. 전체 커버리지는 여러 번 갱신하면 채워집니다."
+    partial: rows.length < universeCount || nextCursor !== 0,
+    message: "나스닥 전체 분석 " + summaryRows.length + "개 갱신, 누적 " + rows.length + "/" + universeCount + "개입니다. 전체 커버리지는 여러 번 갱신하면 채워집니다."
   };
 }
 
@@ -1623,11 +1636,15 @@ function compareScoreRows_(a, b) {
 }
 
 function loadScreeningCache_(market) {
-  const file = getNamedFile_(screeningFileName_(market));
-  if (!file) return { tiers: {} };
-  const text = file.getBlob().getDataAsString("UTF-8");
-  if (!text) return { tiers: {} };
-  return JSON.parse(text);
+  try {
+    const file = getNamedFile_(screeningFileName_(market));
+    if (!file) return { tiers: {} };
+    const text = file.getBlob().getDataAsString("UTF-8");
+    if (!text) return { tiers: {} };
+    return JSON.parse(text);
+  } catch (error) {
+    return { tiers: {}, recoveredFromError: String(error && error.message || error || "") };
+  }
 }
 
 function saveScreeningCache_(cache, market) {
@@ -1774,9 +1791,42 @@ function fetchMarketSummaryByMarket_(pages, market) {
 }
 
 function fetchNasdaqMarketSummary_(pages) {
-  const baseUniverse = getNasdaqBaseStocks_();
-  const maxItems = Math.min(Math.max(Number(pages || 80), 1) * 50, baseUniverse.length);
-  return fetchNasdaqMarketSummaryBatch_(baseUniverse.slice(0, Math.min(maxItems, NASDAQ_FULL_BATCH_SIZE)));
+  try {
+    return fetchNasdaqScreenerRows_(Math.min(Math.max(Number(pages || 80), 1) * 50, NASDAQ_FULL_BATCH_SIZE), 0).rows;
+  } catch (error) {
+    const baseUniverse = getNasdaqBaseStocks_();
+    const maxItems = Math.min(Math.max(Number(pages || 80), 1) * 50, baseUniverse.length);
+    return fetchNasdaqMarketSummaryBatch_(baseUniverse.slice(0, Math.min(maxItems, NASDAQ_FULL_BATCH_SIZE)));
+  }
+}
+
+function fetchNasdaqScreenerRows_(limit, offset) {
+  const size = Math.min(Math.max(Number(limit || NASDAQ_FULL_BATCH_SIZE), 1), NASDAQ_FULL_BATCH_SIZE);
+  const start = Math.max(Number(offset || 0), 0);
+  const url = "https://api.nasdaq.com/api/screener/stocks?tableonly=true&exchange=NASDAQ&limit=" + encodeURIComponent(size) + "&offset=" + encodeURIComponent(start);
+  const payload = JSON.parse(fetchText_(url, "UTF-8"));
+  const data = (payload || {}).data || {};
+  const table = data.table || {};
+  const rows = (table.rows || []).map(parseNasdaqScreenerRow_).filter(Boolean);
+  return {
+    rows,
+    totalRecords: Number(data.totalrecords || data.totalRecords || rows.length || 0)
+  };
+}
+
+function parseNasdaqScreenerRow_(row) {
+  const ticker = normalizeNasdaqSymbol_(row && row.symbol);
+  const name = cleanNasdaqSecurityName_(row && row.name);
+  if (!ticker || !name || !isCompanyLikeNasdaqSecurity_(ticker, name)) return null;
+  return {
+    ticker,
+    name,
+    market: "NASDAQ",
+    currentPrice: toNumber_(row.lastsale),
+    marketCap: toNumber_(row.marketCap),
+    change: toNumber_(row.netchange),
+    changeRate: toNumber_(row.pctchange)
+  };
 }
 
 function fetchNasdaqMarketSummaryBatch_(stocks) {

@@ -1,4 +1,4 @@
-const CACHE_NAME = "aisis-mobile-v13-nasdaq-batch";
+const CACHE_NAME = "aisis-mobile-v14-nasdaq-screener";
 const ASSETS = ["./", "./index.html", "./styles.css", "./app.js", "./kospi_stocks.json", "./manifest.webmanifest", "./app-icon.svg"];
 
 self.addEventListener("install", (event) => {

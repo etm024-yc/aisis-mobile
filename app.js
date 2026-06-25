@@ -682,6 +682,7 @@ function renderPositions() {
       const currentPrice = analysis?.currentPrice || 0;
       const evalAmount = currentPrice ? currentPrice * position.quantity : 0;
       const pnl = evalAmount ? evalAmount - position.costBasis : 0;
+      const riskPlan = positionRiskPlan(position, analysis, market);
       return `
         <article class="position-card" data-ticker="${escapeHtml(position.ticker)}" data-market="${escapeHtml(market)}">
           <div class="position-head">
@@ -693,6 +694,18 @@ function renderPositions() {
             ${metric("평단가", formatPrice(position.avgPrice, market))}
             ${metric("현재가", currentPrice ? formatPrice(currentPrice, market) : "-")}
             ${metric("평가손익", evalAmount ? formatPrice(pnl, market) : "-")}
+          </div>
+          <div class="position-plan">
+            <strong>평단 기준 대응선</strong>
+            <div class="metric-grid">
+              ${metric("주의선", formatPrice(riskPlan.cautionLine, market))}
+              ${metric("손절선", formatPrice(riskPlan.stopLossLine, market))}
+              ${metric("재진입 1차", formatPrice(riskPlan.reentryLine1, market))}
+              ${metric("재진입 2차", formatPrice(riskPlan.reentryLine2, market))}
+              ${metric("익절 검토", formatPrice(riskPlan.takeProfitLine, market))}
+              ${metric("현재 상태", riskPlan.status)}
+            </div>
+            <p>${escapeHtml(riskPlan.memo)}</p>
           </div>
           <div class="broker-list">
             ${position.brokers.map((broker) => `<div>${escapeHtml(broker.broker)} · ${formatNumber(broker.quantity)}주 · ${formatPrice(broker.avgPrice, market)}</div>`).join("")}
@@ -707,6 +720,42 @@ function renderPositions() {
       card.classList.toggle("open");
     });
   });
+}
+
+function positionRiskPlan(position, analysis, market = "KOSPI") {
+  const avgPrice = Number(position?.avgPrice || 0);
+  const currentPrice = Number(analysis?.currentPrice || 0);
+  const analysisStop = Number(analysis?.stopLoss || 0);
+  if (!avgPrice) {
+    return {
+      cautionLine: null,
+      stopLossLine: null,
+      reentryLine1: null,
+      reentryLine2: null,
+      takeProfitLine: null,
+      status: "-",
+      memo: "평단가를 계산할 수 없어 대응선을 표시하지 못했습니다."
+    };
+  }
+  const cautionLine = roundPriceForMarket(avgPrice * 0.95, market);
+  const baseStop = avgPrice * 0.92;
+  const stopLossLine = roundPriceForMarket(analysisStop > 0 ? Math.min(baseStop, analysisStop) : baseStop, market);
+  const reentryLine1 = roundPriceForMarket(avgPrice * 0.90, market);
+  const reentryLine2 = roundPriceForMarket(avgPrice * 0.85, market);
+  const takeProfitLine = roundPriceForMarket(avgPrice * 1.15, market);
+  const status = currentPrice
+    ? currentPrice <= stopLossLine
+      ? "손절 검토"
+      : currentPrice <= cautionLine
+        ? "주의"
+        : currentPrice >= takeProfitLine
+          ? "익절 검토"
+          : "보유 점검"
+    : "시세 대기";
+  const memo = currentPrice
+    ? `현재가는 평단 대비 ${formatPercent(currentPrice / avgPrice - 1)}입니다. 손절 후 재진입은 ${formatPrice(reentryLine1, market)} 이하부터 분할로 보는 기준입니다.`
+    : `현재가가 들어오면 평단 대비 위치와 손절/재진입 판단을 같이 표시합니다.`;
+  return { cautionLine, stopLossLine, reentryLine1, reentryLine2, takeProfitLine, status, memo };
 }
 
 function calculatePositions(transactions) {
@@ -1595,6 +1644,12 @@ function normalizeText(value) {
 function formatPrice(value, market = "KOSPI") {
   if (normalizeMarket(market) === "NASDAQ") return formatDollar(value);
   return formatWon(value);
+}
+
+function roundPriceForMarket(value, market = "KOSPI") {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  return normalizeMarket(market) === "NASDAQ" ? Math.round(number * 100) / 100 : Math.round(number);
 }
 
 function formatWon(value) {
