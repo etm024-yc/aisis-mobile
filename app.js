@@ -1188,7 +1188,10 @@ function toggleWatchlistFromCandidate(ticker, name, checked, market = "KOSPI") {
   if (checked) {
     const candidate = findCandidateByTicker(ticker, market);
     if (candidate) {
-      state.analyses[ticker] = normalizeAnalysis({ ...(state.analyses[ticker] || {}), ...candidate, ticker, market });
+      const current = state.analyses[ticker];
+      if (!current || rowFreshnessTime(candidate) >= rowFreshnessTime(current)) {
+        state.analyses[ticker] = normalizeAnalysis({ ...(current || {}), ...candidate, ticker, market });
+      }
     }
     state.watchlist.unshift({
       ticker,
@@ -1330,6 +1333,13 @@ function normalizeCandidate(item) {
   const market = normalizeMarket(item.market || "KOSPI");
   const ticker = normalizeAnyTicker(item.ticker || "", market) || item.ticker;
   return { ...item, market, ticker, name: displayStockName(ticker, item.name, market) };
+}
+
+function rowFreshnessTime(row) {
+  if (!row) return 0;
+  const priceTime = Date.parse(row.priceFetchedAt || "");
+  const fetchedTime = Date.parse(row.fetchedAt || "");
+  return Math.max(Number.isNaN(priceTime) ? 0 : priceTime, Number.isNaN(fetchedTime) ? 0 : fetchedTime);
 }
 
 function normalizeScreeningPayload(payload, fallbackMarket = "KOSPI") {

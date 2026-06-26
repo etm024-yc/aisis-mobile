@@ -234,11 +234,12 @@ function analyzeStock_(query, seedMoney, market) {
   const quote = market === "NASDAQ" ? fetchNasdaqQuote_(ticker) : fetchQuote_(ticker);
   let fundamental = market === "NASDAQ" ? fetchNasdaqFundamental_(ticker, quote) : fetchFundamental_(ticker);
   const currentPrice = quote.currentPrice || last_(prices).close;
+  const analysisPrices = applyQuoteToDailyPrices_(prices, quote, currentPrice, market);
   fundamental = market === "NASDAQ" ? fundamental : mergeCurrentFundamentals_(ticker, currentPrice, fundamental);
-  const indicators = calculateIndicators_(prices);
-  applyLiveVolumeIndicators_(indicators, prices, quote);
+  const indicators = calculateIndicators_(analysisPrices);
+  applyLiveVolumeIndicators_(indicators, analysisPrices, quote);
   const fairValue = calculateFairValue_(currentPrice, indicators, fundamental);
-  const finalScore = calculateFinalScore_(currentPrice, fairValue, indicators, fundamental, prices);
+  const finalScore = calculateFinalScore_(currentPrice, fairValue, indicators, fundamental, analysisPrices);
   const atr = indicators.atr14 || 0;
   const stopLoss = calculateStopLoss_(currentPrice, atr);
   const upside = currentPrice > 0 ? fairValue / currentPrice - 1 : 0;
@@ -267,9 +268,11 @@ function analyzeStock_(query, seedMoney, market) {
     buyPlan,
     reasons: buildReasons_(finalScore, upside, indicators, fundamental),
     fetchedAt: new Date().toISOString(),
+    priceFetchedAt: quote.priceFetchedAt || quote.fetchedAt || new Date().toISOString(),
+    priceSource: quote.quoteSource || quote.source || "",
     source: market === "NASDAQ"
       ? ((fundamental && fundamental.source ? fundamental.source + " + " : "") + "AISIS mobile")
-      : "Naver Finance + AISIS mobile"
+      : "Naver Finance" + (quote.quoteSource ? " (" + quote.quoteSource + ")" : "") + " + AISIS mobile"
   };
 }
 
@@ -776,22 +779,175 @@ function fetchStooqDailyPrices_(ticker, count) {
 
 function fetchQuote_(query) {
   const ticker = normalizeTicker_(query);
+  const candidates = [
+    safeKospiQuote_(function () { return fetchNaverItemSummaryQuote_(ticker); }),
+    safeKospiQuote_(function () { return fetchNaverPollingQuote_(ticker); }),
+    safeKospiQuote_(function () { return fetchNaverMobileBasicQuote_(ticker); }),
+    safeKospiQuote_(function () { return fetchNaverHtmlQuote_(ticker); })
+  ].filter(Boolean);
+  const selected = chooseKospiQuote_(ticker, candidates);
+  return selected || {
+    ticker,
+    name: "",
+    market: "KOSPI",
+    currentPrice: 0,
+    quoteSource: "unavailable",
+    priceFetchedAt: new Date().toISOString()
+  };
+}
+
+function safeKospiQuote_(factory) {
+  try {
+    const quote = factory();
+    return quote && Number(quote.currentPrice) > 0 ? quote : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function chooseKospiQuote_(ticker, candidates) {
+  const valid = candidates.filter((quote) => quote && Number(quote.currentPrice) > 0);
+  if (!valid.length) return null;
+  const priority = {
+    naver_item_summary: 1,
+    naver_realtime: 2,
+    naver_mobile_basic: 3,
+    naver_html: 4
+  };
+  valid.sort((a, b) => (priority[a.quoteSource] || 99) - (priority[b.quoteSource] || 99));
+  const selected = Object.assign({}, valid[0]);
+  const named = valid.find((quote) => quote.name);
+  selected.ticker = ticker;
+  selected.market = "KOSPI";
+  selected.name = selected.name || (named && named.name) || "";
+  selected.priceFetchedAt = selected.priceFetchedAt || new Date().toISOString();
+  return selected;
+}
+
+function fetchNaverItemSummaryQuote_(ticker) {
+  const url = "https://api.finance.naver.com/service/itemSummary.naver?itemcode=" + encodeURIComponent(ticker);
+  const payload = JSON.parse(fetchText_(url, "UTF-8"));
+  const currentPrice = firstQuoteNumber_(payload.now, payload.closePrice, payload.currentPrice, payload.nv);
+  if (!currentPrice || currentPrice <= 0) throw new Error("itemSummary price unavailable");
+  const diff = firstQuoteNumber_(payload.diff, payload.change, payload.cv);
+  const rate = firstQuoteNumber_(payload.rate, payload.changeRate, payload.cr);
+  return {
+    ticker,
+    name: payload.name || payload.stockName || "",
+    market: "KOSPI",
+    currentPrice,
+    previousClose: diff == null ? null : currentPrice - diff,
+    change: diff,
+    changeRate: rate,
+    volume: firstQuoteNumber_(payload.quant, payload.volume, payload.accumulatedTradingVolume),
+    quoteSource: "naver_item_summary",
+    priceFetchedAt: new Date().toISOString()
+  };
+}
+
+function fetchNaverPollingQuote_(ticker) {
   const url = "https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:" + encodeURIComponent(ticker);
   const text = fetchText_(url, "EUC-KR");
   const payload = JSON.parse(text);
   const areas = (((payload || {}).result || {}).areas || []);
   const datas = areas.length ? areas[0].datas || [] : [];
-  if (!datas.length) return { ticker, name: "", currentPrice: 0 };
+  if (!datas.length) throw new Error("polling price unavailable");
   const data = datas[0];
+  const down = String(data.rf || "") === "4" || String(data.rf || "") === "5";
+  const change = firstQuoteNumber_(data.cv, data.change);
+  const changeRate = firstQuoteNumber_(data.cr, data.changeRate);
   return {
     ticker,
+    market: "KOSPI",
     name: data.nm || "",
-    currentPrice: Number(data.nv || data.closePrice || 0),
-    previousClose: nullableNumber_(data.pcv),
-    change: nullableNumber_(data.cv),
-    changeRate: nullableNumber_(data.cr),
-    volume: nullableNumber_(data.aq || data.accumulatedTradingVolume || data.volume)
+    currentPrice: firstQuoteNumber_(data.nv, data.closePrice, data.now),
+    previousClose: firstQuoteNumber_(data.pcv, data.sv, data.previousClose),
+    change: change == null ? null : change * (down ? -1 : 1),
+    changeRate: changeRate == null ? null : changeRate * (down ? -1 : 1),
+    volume: firstQuoteNumber_(data.aq, data.accumulatedTradingVolume, data.volume),
+    quoteSource: "naver_realtime",
+    priceFetchedAt: new Date().toISOString()
   };
+}
+
+function fetchNaverMobileBasicQuote_(ticker) {
+  const url = "https://m.stock.naver.com/api/stock/" + encodeURIComponent(ticker) + "/basic";
+  const payload = JSON.parse(fetchText_(url, "UTF-8"));
+  const currentPrice = firstQuoteNumber_(payload.closePrice, payload.now, payload.currentPrice, payload.tradePrice, payload.nv);
+  if (!currentPrice || currentPrice <= 0) throw new Error("mobile basic price unavailable");
+  const change = firstQuoteNumber_(payload.compareToPreviousClosePrice, payload.change, payload.diff);
+  const changeRate = firstQuoteNumber_(payload.fluctuationsRatio, payload.changeRate, payload.rate);
+  return {
+    ticker,
+    name: payload.stockName || payload.name || "",
+    market: "KOSPI",
+    currentPrice,
+    previousClose: change == null ? null : currentPrice - change,
+    change,
+    changeRate,
+    volume: firstQuoteNumber_(payload.accumulatedTradingVolume, payload.volume, payload.quant),
+    quoteSource: "naver_mobile_basic",
+    priceFetchedAt: new Date().toISOString()
+  };
+}
+
+function fetchNaverHtmlQuote_(ticker) {
+  const text = fetchText_("https://finance.naver.com/item/main.naver?code=" + encodeURIComponent(ticker), "EUC-KR");
+  const todayBlock = /<p[^>]*class=["']no_today["'][^>]*>([\s\S]*?)<\/p>/i.exec(text);
+  const priceMatch = todayBlock ? /<span[^>]*class=["']blind["'][^>]*>\s*([\d,]+)\s*<\/span>/i.exec(todayBlock[1]) : null;
+  const titleMatch = /<title>\s*([^:<]+)/i.exec(text);
+  const currentPrice = priceMatch ? toNumber_(priceMatch[1]) : null;
+  if (!currentPrice || currentPrice <= 0) throw new Error("html price unavailable");
+  return {
+    ticker,
+    name: titleMatch ? stripTags_(titleMatch[1]) : "",
+    market: "KOSPI",
+    currentPrice,
+    previousClose: null,
+    change: null,
+    changeRate: null,
+    volume: null,
+    quoteSource: "naver_html",
+    priceFetchedAt: new Date().toISOString()
+  };
+}
+
+function firstQuoteNumber_() {
+  for (let index = 0; index < arguments.length; index += 1) {
+    const value = arguments[index];
+    if (value == null || value === "") continue;
+    const number = typeof value === "number" ? value : toNumber_(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return null;
+}
+
+function applyQuoteToDailyPrices_(prices, quote, currentPrice, market) {
+  const rows = Array.isArray(prices) ? prices.slice() : [];
+  if (!rows.length || !currentPrice || currentPrice <= 0) return rows;
+  const timezone = marketCode_(market) === "NASDAQ" ? "America/New_York" : "Asia/Seoul";
+  const today = Utilities.formatDate(new Date(), timezone, "yyyyMMdd");
+  const lastRow = rows[rows.length - 1] || {};
+  const quoteVolume = firstQuoteNumber_(quote && quote.volume);
+  const volume = quoteVolume == null ? lastRow.volume || 0 : Math.max(quoteVolume, lastRow.volume || 0);
+  if (lastRow.date === today) {
+    rows[rows.length - 1] = Object.assign({}, lastRow, {
+      high: Math.max(lastRow.high || currentPrice, currentPrice),
+      low: Math.min(lastRow.low || currentPrice, currentPrice),
+      close: currentPrice,
+      volume
+    });
+  } else {
+    rows.push({
+      date: today,
+      open: currentPrice,
+      high: currentPrice,
+      low: currentPrice,
+      close: currentPrice,
+      volume
+    });
+  }
+  return rows;
 }
 
 function fetchDailyPrices_(ticker, count) {
@@ -1446,7 +1602,9 @@ function analysisToScreenerRow_(analysis, fallback) {
     revenueGrowth: analysis.fundamental && analysis.fundamental.revenueGrowth,
     operatingIncomeGrowth: analysis.fundamental && analysis.fundamental.operatingIncomeGrowth,
     sourceTierScore: fallback.finalScore || null,
-    fetchedAt: analysis.fetchedAt
+    fetchedAt: analysis.fetchedAt,
+    priceFetchedAt: analysis.priceFetchedAt || analysis.fetchedAt,
+    priceSource: analysis.priceSource || ""
   };
 }
 
@@ -1464,8 +1622,11 @@ function refreshLightRows_(sourceRows, market) {
         previousClose: quote.previousClose || null,
         change: quote.change || null,
         changeRate: quote.changeRate || null,
+        volume: quote.volume || row.volume || null,
         upside,
         fetchedAt: new Date().toISOString(),
+        priceFetchedAt: quote.priceFetchedAt || new Date().toISOString(),
+        priceSource: quote.quoteSource || row.priceSource || "",
         reason: "\uC0C1\uC704 20\uAC1C \uCD08\uB2E8\uC704 \uAC00\uACA9 \uBAA8\uB2C8\uD130\uB9C1"
       });
     } catch (error) {
@@ -1579,12 +1740,34 @@ function combineRankedRows_() {
     rows.forEach((row) => {
       if (!row || !row.ticker) return;
       const previous = byTicker[row.ticker];
-      if (!previous || rowScore_(row) >= rowScore_(previous)) {
-        byTicker[row.ticker] = Object.assign({}, previous || {}, row);
-      }
+      byTicker[row.ticker] = mergeRankedRow_(previous, row);
     });
   }
   return Object.values(byTicker).sort(compareScoreRows_);
+}
+
+function mergeRankedRow_(previous, incoming) {
+  if (!previous) return Object.assign({}, incoming);
+  const incomingWins = rowScore_(incoming) >= rowScore_(previous);
+  const merged = Object.assign({}, incomingWins ? previous : incoming, incomingWins ? incoming : previous);
+  const freshPriceRow = rowPriceFreshness_(incoming) >= rowPriceFreshness_(previous) ? incoming : previous;
+  if (freshPriceRow && Number(freshPriceRow.currentPrice) > 0) {
+    ["currentPrice", "previousClose", "change", "changeRate", "volume", "priceFetchedAt", "priceSource", "fetchedAt"].forEach((key) => {
+      if (freshPriceRow[key] != null && freshPriceRow[key] !== "") merged[key] = freshPriceRow[key];
+    });
+    if (merged.fairValue && merged.currentPrice) merged.upside = merged.fairValue / merged.currentPrice - 1;
+  }
+  return merged;
+}
+
+function rowPriceFreshness_(row) {
+  if (!row) return 0;
+  return Math.max(timestampValue_(row.priceFetchedAt), timestampValue_(row.fetchedAt));
+}
+
+function timestampValue_(value) {
+  const date = new Date(value || "");
+  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
 }
 
 function rowScore_(row) {
@@ -1700,6 +1883,7 @@ function twoDigits_(value) {
 
 function scoreMarketRow_(stock) {
   if (marketCode_(stock.market) === "NASDAQ") return scoreNasdaqMarketRow_(stock);
+  const pricedAt = new Date().toISOString();
   let valueScore = 60;
   let qualityScore = 60;
   if (stock.per && stock.per > 0 && stock.per <= 10) valueScore += 16;
@@ -1723,6 +1907,9 @@ function scoreMarketRow_(stock) {
     eps: stock.eps,
     bps: stock.bps,
     roe: stock.roe,
+    fetchedAt: pricedAt,
+    priceFetchedAt: pricedAt,
+    priceSource: stock.priceSource || "naver_market_summary",
     finalScore: rounded,
     recommendation: rounded >= 80 ? "강력 매수 후보" : rounded >= 70 ? "관심 후보" : rounded >= 60 ? "관찰" : "제외"
   };
