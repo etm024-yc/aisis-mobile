@@ -49,6 +49,7 @@ let candidateDialogTierId = "";
 let candidateDialogSort = "score_desc";
 let candidateDialogFilters = new Set(["strong", "review", "watch", "other"]);
 let busyCount = 0;
+let candidateRefreshInProgress = false;
 
 const els = {
   workBanner: document.querySelector("#workBanner"),
@@ -884,6 +885,10 @@ async function screenMarket() {
 
 async function refreshCandidateTiers({ quiet = false, forceTierId = "" } = {}) {
   if (quiet && !isViewActive("candidatesView")) return;
+  if (candidateRefreshInProgress) {
+    if (!quiet) setStatus("후보 갱신이 이미 진행 중입니다.", "warn");
+    return;
+  }
   const config = getSyncConfig();
   if (!config) {
     if (!quiet) setStatus("설정에서 Apps Script URL과 동기화 비밀번호를 먼저 입력하세요.", "warn");
@@ -891,35 +896,64 @@ async function refreshCandidateTiers({ quiet = false, forceTierId = "" } = {}) {
     return;
   }
   const market = selectedMarket();
+  const forceSequence = forceTierId ? forcedTierSequence(forceTierId) : [""];
   if (!quiet) {
-    const message = forceTierId ? `${marketLabel(market)} ${tierLabel(forceTierId)} 강제 갱신 중입니다.` : `${marketLabel(market)} 후보 티어를 확인하고 있습니다.`;
+    const message = forceTierId
+      ? `${marketLabel(market)} ${forceSequence.map(tierLabel).join(" -> ")} 강제 갱신을 시작합니다.`
+      : `${marketLabel(market)} 후보 티어를 확인하고 있습니다.`;
     setStatus(message);
     setBusy(message);
   }
   let busyResult = "후보 갱신 완료";
+  candidateRefreshInProgress = true;
   try {
-    const payload = await jsonp(config.url, {
-      action: "screenMarket",
-      token: config.token,
-      market,
-      forceTier: forceTierId,
-      pages: localStorage.getItem(SCREEN_PAGES_KEY) || "80",
-      limit: "200",
-      seedMoney: localStorage.getItem(SEED_MONEY_KEY) || "0",
-      priorityTickers: priorityCandidateTickers().join(",")
-    });
-    if (!payload.ok) throw new Error(payload.error || "후보 갱신 실패");
-    saveScreeningForMarket(payload, market);
-    saveLocalState({ touch: false, push: false });
-    busyResult = payload.message || "후보 티어를 확인했습니다.";
+    let lastPayload = null;
+    for (let index = 0; index < forceSequence.length; index += 1) {
+      const tierId = forceSequence[index];
+      const label = tierId ? tierLabel(tierId) : `${marketLabel(market)} 후보`;
+      if (!quiet && tierId) updateBusy(`${label} 진행 중`);
+      const payload = await requestScreeningPayload(config, market, tierId, index === 0);
+      if (!payload.ok) throw new Error(payload.error || "후보 갱신 실패");
+      saveScreeningForMarket(payload, market);
+      saveLocalState({ touch: false, push: false });
+      lastPayload = payload;
+      if (!quiet && tierId) {
+        updateBusy(`${label} 마무리`);
+        setStatus(payload.message || `${label} 마무리`);
+        await waitForUi(300);
+      }
+    }
+    busyResult = forceTierId
+      ? `${forceSequence.map(tierLabel).join(" -> ")} 강제 갱신 완료`
+      : (lastPayload?.message || "후보 티어를 확인했습니다.");
     if (!quiet) setStatus(busyResult);
   } catch (error) {
     busyResult = "후보 갱신 실패";
     if (!quiet) setStatus(friendlySyncError(error), "error");
     if (isUnauthorizedError(error)) switchView("settingsView");
   } finally {
+    candidateRefreshInProgress = false;
     if (!quiet) clearBusy(busyResult);
   }
+}
+
+async function requestScreeningPayload(config, market, forceTierId, includePriorityTickers) {
+  return jsonp(config.url, {
+    action: "screenMarket",
+    token: config.token,
+    market,
+    forceTier: forceTierId || "",
+    pages: localStorage.getItem(SCREEN_PAGES_KEY) || "80",
+    limit: "200",
+    seedMoney: localStorage.getItem(SEED_MONEY_KEY) || "0",
+    priorityTickers: includePriorityTickers ? priorityCandidateTickers().join(",") : ""
+  });
+}
+
+function forcedTierSequence(forceTierId) {
+  const flow = ["full_nightly", "top_200_hourly", "top_50_5min", "top_20_realtime"];
+  const index = flow.indexOf(forceTierId);
+  return index >= 0 ? flow.slice(index) : [forceTierId].filter(Boolean);
 }
 
 function renderCandidates() {
@@ -1085,9 +1119,23 @@ function renderCandidateCard(item, index) {
 function candidateRowsForDisplay(rows, options = {}) {
   const filters = options.filters || selectedCandidateFilters();
   return [...rows]
-    .map(normalizeCandidate)
+    .map(hydrateCandidateRow)
     .filter((row) => filters.has(candidateGroup(row)))
     .sort(candidateSortComparator(options.sortMode));
+}
+
+function hydrateCandidateRow(row) {
+  const candidate = normalizeCandidate(row);
+  const analysis = state.analyses?.[candidate.ticker];
+  if (
+    analysis
+    && sameStock(analysis, candidate)
+    && analysis.finalScore != null
+    && rowFreshnessTime(analysis) >= rowFreshnessTime(candidate)
+  ) {
+    return normalizeCandidate({ ...candidate, ...analysis });
+  }
+  return candidate;
 }
 
 function selectedCandidateFilters() {
@@ -1585,6 +1633,12 @@ function setBusy(message) {
   els.workBanner.textContent = message || "작업 중입니다.";
 }
 
+function updateBusy(message) {
+  if (!els.workBanner) return;
+  els.workBanner.hidden = false;
+  els.workBanner.textContent = message || "작업 중입니다.";
+}
+
 function clearBusy(message = "") {
   if (!els.workBanner) return;
   busyCount = Math.max(0, busyCount - 1);
@@ -1593,6 +1647,10 @@ function clearBusy(message = "") {
   window.setTimeout(() => {
     if (busyCount === 0 && els.workBanner) els.workBanner.hidden = true;
   }, message ? 1100 : 0);
+}
+
+function waitForUi(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function setStatus(message, tone = "neutral") {
